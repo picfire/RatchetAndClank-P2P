@@ -1,5 +1,12 @@
 # Docs
 
+This fork targets a native WebAssembly browser port of Ratchet & Clank, then
+two-player P2P co-op. **Roughly 25% complete as of 2026-11-04**, a provisional
+estimate of the full goal, not a measured code or decompilation percentage.
+Veldin and animated Ratchet render with movement, jumping, and static collision;
+full gameplay and co-op are not ready. See the
+[native browser pipeline](build/native-browser-pipeline.md) for evidence and gaps.
+
 Three folders: `build/` (setup, building, progress), `contributing/` (how to
 clean up C) and `game/` (notes on how parts of the game work).
 

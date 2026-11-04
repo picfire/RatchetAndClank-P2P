@@ -1,5 +1,19 @@
 # Native Browser Implementation Pipeline
 
+## Project Summary
+
+Port recovered Ratchet & Clank C to WebAssembly without PS2 emulation, using
+local user-owned USA disc assets, then add two-player P2P co-op.
+**Estimated completion: roughly 25% of the full goal (2026-11-04).** This is a
+provisional scope estimate, not measured code coverage, decompilation progress,
+or a delivery forecast; stages differ substantially in effort.
+
+Working slice: textured Veldin, sky, and Ratchet; keyboard/touch movement and
+jumping; native static collision; original idle/run/jump animation playback.
+Remaining: full original startup and hero logic, scene objects, gameplay camera,
+combat, audio, HUD, progression, saves, transitions, local co-op, and networking.
+The full game is not yet playable; Stage 3/4 gates remain incomplete.
+
 ## Architecture
 
 Recovered game C -> WebAssembly game code -> browser platform adapters.
@@ -201,14 +215,296 @@ runtime without recovering types and validating behavior independently.
 - Asset prerequisite: the local boot executable checksum matches the supported
   USA release. This is not validation of all disc assets.
 - Stage 2: complete for bounded local sector access, ISO9660 file cataloging,
-  and boot checksum verification. Individual raw level assets are not decoded.
+  and boot checksum verification. Selected Veldin assets now decode locally.
 - Stage 3: scene reset, a source-ported frame counter, asset-backed original
-  disc-table initialization, bounded boot/resident archive decoding, and
-  unchanged original C resident-sky relocation verified.
+  disc-table initialization, bounded boot/resident/Veldin archive decoding, and
+  unchanged original C resident/planet-sky relocation verified.
+  Original C world-down acceleration, heading spring, and velocity construction
+  now execute in a separate native module. Original C ground-height probing now
+  runs against a portable static-world collision query and real Veldin data.
+  The original C current-position collision resolver now executes against native
+  sphere/capsule and optional hero-group queries in that same module.
   Full startup/update dependencies remain.
-- Stage 4: a native-relocated resident transition sky now renders in Three.js;
-  a planet level, movement, collision, and camera gameplay remain unimplemented.
+- Stage 4: Veldin terrain, indexed textures, and native-relocated sky now render
+  in Three.js, with native static collision data loaded alongside the scene.
+  Ratchet's actual model now has a bounded native world-down walk/jump controller,
+  static collision resolution, browser controls, and a following orbit camera.
+  Original idle/run/jump poses now play on the skinned model. The complete original
+  hero and animation state machines and gameplay camera remain unfinished;
+  this stage is not complete.
 - Stages 5-7: not implemented or validated.
+
+## Original Hero C Port
+
+`make browser-hero` builds `build/browser/hero-locomotion.wasm` and compiles the
+original frame pipeline, Novalis movement, gravity, collision-history, and
+ground-contact owning files into WebAssembly bitcode. Those full update files
+compile; their complete gameplay path does **not** link or execute yet. This
+target is not a playable hero build and is not connected to the viewer controls.
+
+The linked world-down locomotion slice executes these original implementations:
+
+- `speed_step` from `src/overlays/shared/hero/hero_switch_item.c`.
+- `approach_value` from `src/math/interpolation/approach_value.c`.
+- `spring_angle` and `compute_directed_angle_delta` from
+  `src/overlays/shared/math/interpolation/compute_directed_angle_delta.c`.
+- `advance_damped_scalar_velocity` from
+  `src/overlays/shared/mobys/find_moby_hit.c`.
+- `build_spherical_offset` from `src/camera/build_spherical_offset.c`.
+
+`browser/hero.c` owns the original `struct Hero`, asserts its 0x2300 size and
+critical field offsets at compile time, validates inputs, and connects those
+functions for world-down motion only. It supplies explicit portable trig and
+wrapped-angle helpers; numerical equivalence to PS2 approximations is unverified.
+There is no position integration, input loop, ground collision, animation, or
+Ratchet mesh in this slice. Alternate gravity is not exposed or silently stubbed.
+
+Two recovered mixed-integer/float function declarations disagree with their
+callers under the WebAssembly ABI: interpolation's pointer argument and the
+directed-angle helper's integer argument appear in different positions. Scoped
+function-like compile definitions reorder those function signatures for this
+module while preserving their bodies and all original files. These are local
+ABI adaptations, not a general repair of every prototype in the recovered tree.
+The browser-only `qcopy.h` substitutes fixed 16-byte copies for MIPS lq/sq.
+LTO removes unrelated functions and their conflicting prototypes before linking.
+New adapter compilation and undefined-symbol checks remain strict; legacy-C
+compatibility flags apply only to the recovered files.
+
+Verification performed:
+
+- `make browser-hero` succeeds, including strict linking with no host imports.
+- An inline Node execution and browser execution through the existing game page
+  both accelerated to speed 1, converged to heading pi/2, and produced velocity
+  approximately `(0, 1, 0)`. Braking reached zero. Invalid inputs were rejected
+  and reset cleared owned state. These exercise the native C functions, not a
+  JavaScript implementation of their logic.
+- Original `src/`, `include/`, `scripts/`, and `config/` remain unchanged.
+
+The earlier complete Novalis movement link probe had 50 unique unresolved symbols, including
+owned world/collision state, assembly math helpers, and these low-level queries:
+`FUN_001efa68` (line), `FUN_L00_001f0d60` (sphere),
+`FUN_L00_001f19a0` (capsule/rig probe), and `FUN_L00_001f3170`.
+That inventory predates the native static sphere/capsule and hero-group bindings
+below; it is not the current resolver's unresolved count. For example,
+`src/assembly/textbin/world/collision/coll_line_fix.c` is an
+`INCLUDE_ASM` declaration, not a portable C collision implementation. Original
+high-level collision history and ground-contact C are available, but cannot run
+correctly without those queries and their actual world data. They are not bound
+to success-returning stubs or hidden with permissive linker options.
+
+There is also a recovered return-type mismatch: `FUN_L00_00213350` is defined
+as void while movement consumes a float. Its documented behavior is the velocity
+dot product with hero heading; it needs a validated native correction before
+full movement integration. Next work is these collision/math services and real
+world-state bindings, then original hero initialization/frame execution. Do not
+substitute new JavaScript gameplay or another viewer feature for that work.
+
+## Controlled Hero Slice
+
+`browser/hero.c` now exposes persistent `runtime_hero_control_reset`,
+`runtime_hero_control_step`, and `runtime_hero_control_grounded` in the combined
+zero-import native module. The bounded 60 Hz driver reuses unchanged original
+`speed_step`, heading spring, spherical velocity construction, and current-position
+collision resolution. It does not claim to execute the full original
+`apply_hero_motion_and_resolve_collisions` or the complete hero state machine.
+
+World-down integration, static floor grounding, landing, ceiling response, and
+grounded-only jump admission are explicit browser-port C adaptations. Running
+uses the recovered 5.7 units/second; walking uses 2.5. The jump setup derives from
+normal-jump values in `hero_set_state.c`: 1.47-unit target rise, gravity 29.7,
+and falling gravity multiplied by 1.17. Immediate takeoff uses a derived vertical
+impulse, not the original animation-keyed takeoff timeline. Fixed steps and a
+bounded fall displacement keep the capsule within the static collision query's
+resolution range. Held jump cannot retrigger on landing. Unsupported original
+platform/gravity/gameplay systems have not been replaced by success stubs.
+
+The viewport maps WASD or arrow keys into camera-relative movement, Space into
+jump, Shift into walking, and R into reset. Dragging orbits and the wheel zooms;
+the camera follows position while preserving its orbit offset. Narrow/coarse
+screens have captured multi-pointer direction, jump, and reset buttons.
+Blur/visibility changes release input and discard elapsed simulation time;
+falling 40 units below the starting surface resets the native hero. Loading a
+different disc disables controls and clears input. `readHeroState()` provides a
+read-only snapshot for verification, without an in-game diagnostic panel.
+
+Validation on 2026-11-04:
+
+```sh
+make browser-game
+RNC_ISO_PATH="$PWD/dumps/Ratchet & Clank (USA) (En,Fr,De,Es,It).iso" \
+  node --test browser/collision.test.mjs
+node --check browser/game.mjs
+```
+
+- All four focused tests pass, including original resolver regression, real
+  Veldin data, walk displacement, jump/landing, held-jump rejection, diagonal
+  normalization, long falls, wall blocking, readiness, and invalid input.
+- Actual browser keyboard execution moved Ratchet 1.25 units during the sampled
+  W hold; Space rose approximately 1.39 units and landed. The follow-camera
+  offset error was zero in that check.
+- At 390x844, touch movement covered 0.60 units; touch jump rose 1.39 and landed.
+  Lost-focus settling drift was 0.0035 units. Control bounds fit without
+  horizontal overflow. Desktop/mobile canvas captures remain nonblank.
+- Native compilation/linking, module syntax, editor diagnostics, cleanup, and
+  original-source preservation checks pass. No original `src/`, `include/`,
+  `scripts/`, or `config/` files changed.
+
+The subsequent animation slice below adds original idle/run/jump poses. Combat,
+moving platforms, alternate gravity, complete retail collision filtering, and
+original camera behavior remain unsupported. Stage 3/4 gates remain incomplete.
+
+## Original Hero Animations
+
+`browser/moby-geometry.mjs` preserves original matrix-palette transfers and
+one-, two-, and three-joint skin weights, including delayed cached vertices.
+The 6,856-triangle mesh has normalized influences spanning 107 of 111 joints.
+`browser/moby-animation.mjs` independently reads the original pose data; no
+Wrench implementation or PS2 instruction interpreter is linked into the viewer.
+
+Veldin's model has 134 empty sequence pointers. The owning original
+`load_level_gameplay.c` installs them from the level header's word `0x1E`:
+table offset 30,800, entries relative to the decoded core. Frame pointers are
+relative to each sequence, as in `relocate_asset_entry_pointers.c`. The selected
+level frames are expanded, not the separate compressed animation format.
+Idle selection comes from `hero_idle_sequence.c`; run and normal jump from
+`hero_set_state.c`: sequences 0, 4, and 7 respectively, with 10, 23, and 29 frames.
+
+The bounded reader validates frame ranges, normalized signed-16-bit quaternion
+records, indexed scale/translation records, source rates, and joint parents.
+Translations use model scale / 1024, scales / 4096. Stored quaternion rotations
+are conjugated for Three.js; the opposite convention visibly raised idle arms
+above the head. Skeleton bind translations and original per-vertex influences
+drive four shared-skeleton `SkinnedMesh` batches. Three.js interpolates poses
+and crossfades transitions over 0.12 seconds.
+
+Native grounded state and speed select the clips. Idle and running loop at
+source rates, with run playback scaled to movement speed; walking slows the
+same run clip. Jump plays once at 3.2 times its source rate to match this slice's
+immediate takeoff, then returns to idle/run on landing. This selection/timing is
+an explicit browser adapter, not execution of the original animation evaluator,
+animation-keyed takeoff, full hero state machine, or verified retail pose parity.
+Hidden views pause playback; reset, reload, and errors clear mixer resources.
+
+Validation on 2026-11-04:
+
+```sh
+make browser-game
+RNC_ISO_PATH="$PWD/dumps/Ratchet & Clank (USA) (En,Fr,De,Es,It).iso" \
+  node --test browser/collision.test.mjs
+node --check browser/game.mjs
+node --check browser/moby-animation.mjs
+```
+
+- All four tests pass with no skips, including all 62 decoded clip frames,
+  changing rotations, finite transforms, normalized quaternions/skin weights,
+  valid joint indices, malformed animation-table rejection, and native controls.
+- Actual browser idle poses change over time, movement selects run 4, and
+  keyboard/touch jumps select 7 before landing back in idle 0. Original textured
+  limbs visibly articulate without stretched geometry in inspected captures.
+- Desktop 1280x800 and mobile 390x844 captures render the character. Mobile
+  canvas pixel sampling is nonblank, has no horizontal overflow, and touch jump
+  returns to grounded idle. Existing controls and camera following remain active.
+- ISO and decoded assets remain local/ignored. Full scene rendering, the full
+  original frame/animation pipeline, combat, co-op, and P2P are not complete.
+
+## Native Static Collision
+
+`make browser-collision` builds a strict, zero-host-import `collision.wasm`.
+`make browser-game` includes it and initializes collision from the same local
+planet core used by the renderer. Failed loads and reloads reset collision state.
+The original `src/world/collision/probe_ground_height.c` compiles unchanged and
+executes through a narrow native line-query binding. No viewer physics or hero
+movement has been substituted for the recovered game code.
+
+`browser/collision.c` independently implements the static asset reader and
+segment/triangle intersection; it is **not** a recovered complete `FUN_001efa68`.
+That assembly query's REA output still contains unmodelled vector operations.
+The serialized format was checked against the pinned Wrench collision format
+reference (`46e80430158a4a11e9cbd51424c84a015bbab058`); no Wrench implementation
+is copied or linked into this runtime.
+
+For Veldin, core header offset 0x14 selects collision at 2,090,944; header offset
+0x60 selects the following texture payload at 2,889,472. The 798,528-byte block
+contains a mesh offset and optional hero-group offset. Its mesh uses Z/Y/X tables
+of 4-unit cells, signed packed 10/10/12-bit vertices, triangle/quad index records,
+and material IDs. The reader validates ranges, indices, encoded cell sizes, and
+traversal budgets before enabling queries. The native result reuses the original
+`CollisionHit` point/normal layout, with compile-time offset assertions.
+
+Supported: double-sided static segment hits, nearest hit fraction, world point,
+normalized face normal, material ID, original C ground-height probing, and the
+static sphere/capsule and hero-group resolution described below.
+The original probe's line binding accepts only its flags-2/null-object call;
+unsupported arguments trap. This does not establish retail flag/filter semantics.
+Dynamic mobys, full collision-history integration, PS2 numerical parity,
+and the complete original hero frame
+are still unimplemented. This module must not be used as their success stub.
+
+Verification on 2026-11-04:
+
+- `make browser-collision` and `make browser-game` succeeded with strict errors
+  and undefined-symbol checks; the collision module has zero host imports.
+- Inline Node fixture checks passed for signed vertices, both quad halves,
+  normals/materials, original C ground height, misses, degenerate segments,
+  nonfinite inputs, truncated data, invalid indices, and corrupted guards.
+- Local ISO execution and actual browser execution both loaded 5,783 cells and
+  53,411 stored faces. The original C probe at `(100, 180, 90)` with offset 10
+  returned height `45.02499008178711`, material 12, and normal approximately
+  `(0.026597, 0.084521, 0.996067)`. A miss cleared the prior hit.
+- An inline Node sweep made 2,000 real-world queries in 42.65 ms, averaging
+  0.0213 ms/query on this development machine; browser/device performance is not
+  established by that measurement.
+- The live browser rejected a non-disc file, cleared collision metadata, then
+  successfully reloaded Veldin. No character or movement controls were added.
+
+### Original Hero Collision Resolution
+
+The combined `hero-locomotion.wasm` now includes the unchanged
+`resolve_hero_current_position_collisions` from
+`src/overlays/shared/hero/hero_switch_item.c`. Its eight-attempt loop consumes
+native capsule/sphere push-out, contact points, and normals, and updates the
+original `struct Hero`. The browser-only collision header binds offset hit fields
+to one owned `CollisionHit`; it does not allocate disconnected global copies.
+The live browser loads this combined module instead of the standalone line module.
+
+Portable sphere/capsule services compute the closest capsule-axis/triangle
+points over the original collision mesh, including quad halves and expanded cell
+bounds. Optional hero-group triangles are validated and queried separately,
+preserving a prior capsule hit when the group query misses. Veldin's actual group
+table is present but empty. Static null-object mask-0x24 calls are admitted;
+other masks, moving objects, alternate gravity, and pending path clearance are
+unsupported, with explicit traps rather than success-returning stubs. Portable
+vector services replace the assembly helpers used by this selected C loop.
+This establishes geometric behavior, not full retail collision/filter parity.
+
+The real Veldin query moved the original Hero capsule from
+`(100, 180, 45.274990)` to approximately `(100.006676, 180.021210, 45.524998)`
+and set `hero.wall_hit`. Focused floor/wall/edge/separation fixtures, a nonempty
+hero-group fixture, malformed data, readiness, and real-disc execution run with:
+
+```sh
+RNC_ISO_PATH="$PWD/dumps/Ratchet & Clank (USA) (En,Fr,De,Es,It).iso" \
+  make browser-collision-test
+```
+
+Level-label correction: Veldin Tutorial is overlay **L00**, while **L01 is
+Novalis**. Earlier notes calling the L01 motion file Veldin were incorrect.
+The shared Veldin-compatible motion integration function is
+`apply_hero_motion_and_resolve_collisions` (`FUN_L00_00213880`) in
+`hero_switch_item.c`; it is not yet linked or executed. Next are its original
+ground-contact helpers, attachment/world-state ownership, remaining math, and
+the forward-component return-ABI correction, followed by full input/frame and
+character rendering. The current resolver probe is not a hero initialization or
+playable movement loop.
+
+For static investigation, the existing overlay extractor reconstructed Veldin
+Tutorial as `build/rea/veldin-overlay.elf`, matching pinned SHA-256
+`8f1e00c8be75635db809679890fb5c128ba208e780461699f73e3a5344356ec9`.
+Direct Ghidra analysis with `r5900:LE:32:default` at 0x1F3170 confirmed the
+extra query's optional group traversal. Boot-file addresses must not be used
+for overlay code. REA numeric procedure selectors here used source file
+offsets; the mapped overlay routine was not automatically discovered there.
+Analysis artifacts remain ignored outside the served browser directory.
 
 ## Native Viewport
 
@@ -219,19 +515,79 @@ The parent checkout's HTML prototype is untouched. Three.js 0.180.0 is installed
 locally under ignored `build/browser/node_modules`; the page uses no remote CDN.
 
 Selecting the local USA disc initializes the native C runtime and renders the
-original resident transition sky, not a synthetic scene: six shells, 4608
-triangles, original colours, UVs, and indexed palette textures. Geometry comes
-from native-relocated records in owned WebAssembly memory. The browser graphics
-adapter translates their signed 16-bit positions and triangle streams to WebGL;
-it does not execute PS2 graphics instructions. Adjacent triangles sharing a
-texture are batched. Dragging rotates the view. Textures, blending, and shell
-transforms are an initial browser interpretation, not verified PS2 visual parity.
+original resident transition sky while loading Veldin. The planet then renders
+460 terrain fragments, 24,520 triangles, 78 indexed textures, and its own sky:
+five shells, eight textures, and 2366 sky triangles. Terrain geometry, UVs,
+material assignments, and baked vertex colours come from the actual level core.
+Dragging orbits the view; panning and zooming are available. Initial framing
+accounts for both viewport dimensions.
 
-Actual rendering, nonblank canvas pixels, camera interaction, and desktop/mobile
-framing were checked in the browser. This is the first visible game-asset scene,
-not a playable planet or completed Stage 4. No replacement hero or gameplay was
-invented. Next work is the selected planet's terrain, textures, and original
-hero/collision/camera integration.
+The browser graphics adapters read stored packed asset arrays and convert them
+to WebGL meshes; they do not execute MIPS/VU programs or provide a PS2 runtime.
+Terrain positions combine their signed 16-bit values with the stored origin,
+then divide by 1024. Full-detail strips supply triangle indices. Palette
+locations follow the original texture-upload allocation order. Format notes at
+the pinned Wrench commit were consulted, but no Wrench implementation is linked
+or copied into the browser runtime. Texturing, sky blending, and shell transforms
+remain an initial browser interpretation, not verified PS2 visual parity.
+
+Actual textured rendering and camera interaction were checked in the browser.
+This is a real planet-asset scene, not playable Ratchet gameplay or completed
+Stage 4. No replacement hero or gameplay was invented. Ratchet's actual class-zero
+model initially rendered in a static pose. The controlled hero and animation
+slices above now add movement and original idle/run/jump poses; remaining scene
+objects, sky fidelity, and full original hero/collision/camera integration remain
+unfinished.
+
+### Ratchet Visual Record
+
+- The original hero initializer selects moby class zero. Veldin's 125-entry
+  class table contains that model at core offset 7,574,848, with texture
+  remapping `[0, 1, 2, 3]`. The resident classes 531-533 are not this model.
+- `browser/moby-geometry.mjs` independently decodes its 63 high-detail packets
+  into 6,856 triangles and four material batches. Positions use class scale
+  divided by 1024; delayed vertex IDs and duplicate records reconstruct cached
+  vertices. Packed draw records provide UVs, texture changes, restart flags,
+  and end padding. Padding is excluded rather than drawn as stretched triangles.
+- The existing indexed texture decoder also reads the moby texture table.
+  Ratchet's four original images are 256, 128, 64, and 32 pixels square.
+  No game assets or upstream Wrench implementation are copied into source.
+- The viewport places this static model on a ray-verified rendered terrain
+  surface at `(145, 140, 30.179)` and starts with a close front camera.
+  This is visual placement, not the original hero spawn or gameplay state.
+  Resources are disposed on disc reload and load failure.
+- Verification: `make browser-game`; module syntax, cleanup, whitespace, and
+  unchanged original-source checks; focused real-disc mesh/texture decoding
+  and truncated-data rejection. Browser loading reaches `Veldin / Ratchet`.
+  Direct canvas captures at 1280x800 and 390x844 show the textured character,
+  nonblank pixels, no horizontal overflow, and interactive orbiting.
+- The controlled hero and original animation slices now move, jump, and skin
+  this mesh. They do not execute the full original frame loop or add co-op,
+  networking, or verified PS2 visual parity.
+  Stage 3 and Stage 4 remain incomplete.
+
+### Veldin Asset Record
+
+- The known enclosing archive starts at sector 1885907; its reserved first
+  sector is empty. The asset root starts at sector 1885908, with 6989 sectors
+  available. Asset offsets are relative to that root, not the reserved sector.
+- The level header is 32,160 bytes. Its compressed core is 9,515,621 bytes,
+  decoding to 16,766,912 bytes. Disc requests remain at most 1 MiB each.
+- A separate `planet-wad.wasm` uses fixed 64 MiB memory, a 16 MiB input buffer,
+  and a 32 MiB output buffer. Existing boot/resident decoder limits are unchanged.
+  Planet loads have decoder ownership checks for cancellation/supersession.
+- Terrain begins at core offset zero. Its 64-byte records reference shared and
+  full-detail arrays. The reconstructed world bounds are approximately
+  `(86.669, 67.960, 5.999)` to `(233.084, 307.479, 43.509)`.
+- Terrain pixel data begins at core offset 2,889,472. The separate 586,496-byte
+  upload block supplies palettes; all 78 terrain textures decode successfully.
+- Veldin sky occupies core offsets 1,556,416 through 2,090,944. Only that
+  534,528-byte block is staged in the existing 4 MiB native sky buffer. Original
+  C relocation succeeds and native guards remain valid.
+- Verification: `make browser-game`; `node --check` on the changed modules;
+  focused real-ISO terrain/texture/sky decoding; actual browser scene loading
+  and interactive rendering. Original source trees remain unchanged. No game
+  assets are uploaded or committed.
 
 ## Stage 3 Resident And Sky Execution Record
 

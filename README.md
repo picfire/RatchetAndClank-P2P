@@ -24,6 +24,23 @@
 > Lombyte does not include game data, executables, disc images, or proprietary toolchains.<br>
 > A legitimately obtained copy of the **USA / NTSC-U** release (`SCUS_971.99`) is required.
 
+## Browser Port And Co-op Fork
+
+This fork ports recovered Ratchet & Clank C to WebAssembly, with browser
+rendering and user-selected local USA disc assets, without PS2 emulation.
+The goal is a playable browser game followed by two-player P2P co-op.
+
+**Estimated completion: roughly 25% of that full goal (2026-11-04).** This is a
+provisional scope estimate, not measured code coverage, decompilation progress,
+or a delivery forecast. Veldin terrain, textures, sky, and Ratchet render;
+keyboard/touch movement, jumping, static collision, and original idle/run/jump
+animations work in a limited slice. Full original gameplay, combat, audio, HUD,
+level transitions, local co-op, and P2P networking remain unfinished.
+
+See the [native browser pipeline](docs/build/native-browser-pipeline.md) for
+verified milestones and limitations. The upstream decompilation information below
+describes the separate PS2 matching project.
+
 <h3>Decompilation progress</h3>
 
 <p align="center">

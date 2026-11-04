@@ -15,6 +15,17 @@
     input::file-selector-button { font: inherit; color: #edf5f2; background: #142823; border: 1px solid #6c9586; padding: 8px 12px; border-radius: 3px; margin-right: 10px; cursor: pointer; }
     footer { position: absolute; inset: auto 0 0; padding: 16px 24px; background: linear-gradient(transparent, #070a0cd9); pointer-events: none; font-size: 13px; }
     #status { margin: 0; }
+    .touch-controls { display: none; position: absolute; inset: auto 16px 58px; align-items: end; justify-content: space-between; pointer-events: none; }
+    .direction-pad { display: grid; grid-template: repeat(3, 44px) / repeat(3, 44px); gap: 3px; }
+    .touch-controls button { width: 44px; height: 44px; border: 1px solid #6c9586; border-radius: 4px; background: #142823d9; color: #edf5f2; font-size: 24px; padding: 0; pointer-events: auto; touch-action: none; user-select: none; }
+    .touch-controls button:active { background: #38745f; }
+    .direction-pad [data-control="KeyW"] { grid-area: 1 / 2; }
+    .direction-pad [data-control="KeyA"] { grid-area: 2 / 1; }
+    .direction-pad [data-control="KeyS"] { grid-area: 2 / 2; }
+    .direction-pad [data-control="KeyD"] { grid-area: 2 / 3; }
+    .touch-actions { display: flex; gap: 10px; padding-bottom: 47px; }
+    .touch-actions [data-control="Space"] { width: 56px; height: 56px; }
+    @media (max-width: 600px), (pointer: coarse) { body[data-state="rendering"] .touch-controls { display: flex; } }
     body[data-state="error"] #status { color: #ff9a87; }
     @media (max-width: 600px) { header { align-items: flex-start; flex-direction: column; padding: 14px 16px; gap: 10px; } h1 { font-size: 20px; } footer { padding: 14px 16px; } }
   </style>
@@ -24,6 +35,18 @@
   <canvas aria-label="Ratchet and Clank native game viewport"></canvas>
   <header><h1>Ratchet &amp; Clank</h1><input id="disc" aria-label="Local USA disc image" type="file" accept=".iso" disabled></header>
   <footer><p id="status" role="status">Starting native runtime...</p></footer>
+  <div class="touch-controls" aria-label="Character controls">
+    <div class="direction-pad">
+      <button type="button" data-control="KeyW" aria-label="Move forward" title="Move forward">&#8593;</button>
+      <button type="button" data-control="KeyA" aria-label="Move left" title="Move left">&#8592;</button>
+      <button type="button" data-control="KeyS" aria-label="Move backward" title="Move backward">&#8595;</button>
+      <button type="button" data-control="KeyD" aria-label="Move right" title="Move right">&#8594;</button>
+    </div>
+    <div class="touch-actions">
+      <button type="button" data-control="KeyR" aria-label="Reset position" title="Reset position">&#8634;</button>
+      <button type="button" data-control="Space" aria-label="Jump" title="Jump">&#10514;</button>
+    </div>
+  </div>
   <script type="module" src="./game.mjs"></script>
 </body>
 </html>

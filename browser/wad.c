@@ -1,8 +1,12 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifndef INPUT_LIMIT
 #define INPUT_LIMIT (1024u * 1024u)
+#endif
+#ifndef OUTPUT_LIMIT
 #define OUTPUT_LIMIT (16u * 1024u * 1024u)
+#endif
 #define GUARD_BYTES 16u
 
 static uint8_t input[INPUT_LIMIT + GUARD_BYTES];
