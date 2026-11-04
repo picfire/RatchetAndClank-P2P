@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ratchet &amp; Clank / Native</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Trebuchet MS", sans-serif; color: #edf5f2; background: #070a0c; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    header { position: absolute; inset: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 24px; background: linear-gradient(#070a0cd9, transparent); pointer-events: none; }
+    h1 { margin: 0; font-size: 23px; font-weight: 700; }
+    input { pointer-events: auto; font: 12px "Trebuchet MS", sans-serif; width: 100%; min-width: 0; max-width: 260px; }
+    input::file-selector-button { font: inherit; color: #edf5f2; background: #142823; border: 1px solid #6c9586; padding: 8px 12px; border-radius: 3px; margin-right: 10px; cursor: pointer; }
+    footer { position: absolute; inset: auto 0 0; padding: 16px 24px; background: linear-gradient(transparent, #070a0cd9); pointer-events: none; font-size: 13px; }
+    #status { margin: 0; }
+    body[data-state="error"] #status { color: #ff9a87; }
+    @media (max-width: 600px) { header { align-items: flex-start; flex-direction: column; padding: 14px 16px; gap: 10px; } h1 { font-size: 20px; } footer { padding: 14px 16px; } }
+  </style>
+  <script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js"}}</script>
+</head>
+<body data-state="starting">
+  <canvas aria-label="Ratchet and Clank native game viewport"></canvas>
+  <header><h1>Ratchet &amp; Clank</h1><input id="disc" aria-label="Local USA disc image" type="file" accept=".iso" disabled></header>
+  <footer><p id="status" role="status">Starting native runtime...</p></footer>
+  <script type="module" src="./game.mjs"></script>
+</body>
+</html>

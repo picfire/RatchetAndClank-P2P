@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Native Runtime / Scene State</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f8f6; color: #202a25; font: 14px/1.5 "Courier New", monospace; }
+    main { max-width: 860px; padding: 24px 16px; margin: auto; }
+    h1 { font-size: 24px; } h2 { font-size: 18px; }
+    section { border-top: 1px solid #cdd8d0; padding: 16px 0; }
+    .controls { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+    button { font: inherit; padding: 6px 12px; border: 1px solid #cdd8d0; border-radius: 4px; background: white; color: #136440; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .file-label { display: grid; gap: 6px; flex: 1 1 260px; min-width: 0; }
+    input[type="file"] { max-width: 100%; font: inherit; }
+    .table-wrap { overflow-x: auto; }
+    [hidden] { display: none; }
+    dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, 1fr); gap: 8px; }
+    dd { margin: 0; font-variant-numeric: tabular-nums; min-height: 21px; overflow-wrap: anywhere; }
+    table { width: 100%; border-collapse: collapse; } td, th { text-align: left; padding: 8px 4px; border-bottom: 1px solid #cdd8d0; }
+    th { font-weight: normal; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    body[data-result="failed"] #status { color: #a32626; }
+    @media (max-width: 480px) { h1 { font-size: 20px; } }
+  </style>
+</head>
+<body data-result="running" data-clock="stopped">
+  <main>
+    <h1>Native Runtime / Scene State</h1>
+    <p id="status" role="status">Running checks...</p>
+    <section>
+      <div class="controls">
+        <label><input id="running" type="checkbox" disabled> Browser frame callback</label>
+        <button id="reset-scene" type="button" disabled>Reset Scene</button>
+      </div>
+      <dl>
+        <dt>Frame count</dt><dd id="frames">0</dd>
+        <dt>Elapsed microseconds</dt><dd id="time">0</dd>
+        <dt>Buffer guards</dt><dd id="guards">Pending</dd>
+      </dl>
+      <table>
+        <thead><tr><th scope="col">Owned buffer</th><th scope="col">Bytes</th><th scope="col">Wasm offset</th></tr></thead>
+        <tbody id="buffers"></tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Native disc initialization</h2>
+      <div class="controls">
+        <label class="file-label">Local USA disc image<input id="disc" type="file" accept=".iso" disabled></label>
+        <button id="cancel-disc" type="button" disabled>Cancel</button>
+      </div>
+      <p id="disc-status" role="status">No disc selected.</p>
+      <div id="disc-details" hidden>
+        <dl>
+          <dt>Native table bytes</dt><dd id="table-bytes"></dd>
+          <dt>Table SHA-256</dt><dd id="table-hash"></dd>
+          <dt>Read requests / sync / error checks</dt><dd id="disc-calls"></dd>
+          <dt>Disc bytes read</dt><dd id="disc-read-bytes"></dd>
+          <dt>Disc guards</dt><dd id="disc-guards"></dd>
+          <dt>Decoded boot bytes</dt><dd id="boot-bytes"></dd>
+          <dt>Boot SHA-256</dt><dd id="boot-hash"></dd>
+          <dt>Decoded resident bytes</dt><dd id="resident-bytes"></dd>
+          <dt>Resident SHA-256</dt><dd id="resident-hash"></dd>
+          <dt>Resident moby / texture classes</dt><dd id="resident-classes"></dd>
+          <dt>Resident textures</dt><dd id="resident-textures"></dd>
+          <dt>Relocated sky shells / textures</dt><dd id="sky-counts"></dd>
+          <dt>Native sky guards</dt><dd id="sky-guards"></dd>
+          <dt>Decoder guards</dt><dd id="boot-guards"></dd>
+        </dl>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Archive</th><th scope="col">Sector</th><th scope="col">Sectors</th><th scope="col">Bytes</th></tr></thead>
+            <tbody id="archives"></tbody>
+          </table>
+        </div>
+        <h2>Boot module ranges</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Slot</th><th scope="col">Archive offset</th><th scope="col">Bytes</th><th scope="col">Format</th></tr></thead>
+            <tbody id="boot-modules"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    <section><h2>Native C checks</h2><pre id="results"></pre></section>
+  </main>
+  <script type="module">
+    import { IsoReader } from './iso-reader.mjs';
+    import { initializeDiscTable } from './disc-loader.mjs';
+
+    const element = id => document.getElementById(id);
+    const status = element('status');
+    const running = element('running');
+    const reset = element('reset-scene');
+    const results = element('results');
+    let api;
+    let decoder;
+    let frameId;
+    let origin;
+    let passed = 0;
+    let discJob;
+
+    function check(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+
+    function test(label, run) {
+      run();
+      passed += 1;
+      results.textContent += `PASS: ${label}\n`;
+    }
+
+    function buffer(index) {
+      return new Uint8Array(api.memory.buffer, api.runtime_buffer_address(index), api.runtime_buffer_size(index));
+    }
+
+    function display() {
+      element('frames').textContent = String(api.runtime_frame_count());
+      element('time').textContent = String(api.runtime_time());
+      element('guards').textContent = api.runtime_guards_valid() === 1 ? 'Valid' : 'FAILED';
+    }
+
+    function failure(error) {
+      cancelAnimationFrame(frameId);
+      running.checked = false;
+      running.disabled = true;
+      reset.disabled = true;
+      document.body.dataset.result = 'failed';
+      document.body.dataset.clock = 'stopped';
+      status.textContent = `FAILED: ${error.message}`;
+      console.error(error);
+    }
+
+    function frame(timestamp) {
+      try {
+        check(api.runtime_step(Math.max(0, Math.round((timestamp - origin) * 1000))) === 0, 'Frame callback rejected clock/state.');
+        display();
+        if (running.checked) frameId = requestAnimationFrame(frame);
+      } catch (error) {
+        failure(error);
+      }
+    }
+
+    try {
+      const response = await fetch('./runtime.wasm');
+      check(response.ok, `Module request failed: ${response.status}`);
+      const module = await WebAssembly.compile(await response.arrayBuffer());
+      check(WebAssembly.Module.imports(module).length === 0, 'Unexpected unresolved host imports.');
+      api = (await WebAssembly.instantiate(module, {})).exports;
+      api._initialize?.();
+      const decoderResponse = await fetch('./wad.wasm');
+      check(decoderResponse.ok, `Decoder request failed: ${decoderResponse.status}`);
+      const decoderModule = await WebAssembly.compile(await decoderResponse.arrayBuffer());
+      check(WebAssembly.Module.imports(decoderModule).length === 0, 'Unexpected decoder host imports.');
+      decoder = (await WebAssembly.instantiate(decoderModule, {})).exports;
+      decoder._initialize?.();
+      test('bounded archive decoder starts empty', () => {
+        decoder.wad_reset();
+        check(decoder.wad_guards_valid() === 1 && decoder.wad_ready() === 0, 'Decoder initialization failed.');
+        check(decoder.wad_decode(0, decoder.wad_output_capacity()) === -1, 'Empty compressed input accepted.');
+      });
+      test('owned scene initialization', () => {
+        check(api.runtime_init() === 0, 'Initialization failed.');
+        for (let index = 0; index < 3; index += 1) check(buffer(index).every(value => value === 0), 'Scene buffer not clear.');
+        check(api.runtime_guards_valid() === 1, 'Guard damaged.');
+      });
+      test('original reset after native state mutation', () => {
+        for (let index = 0; index < 3; index += 1) {
+          check(api.runtime_fill(index, -1, 0, api.runtime_buffer_size(index)) === 0, 'Fill failed.');
+          check(buffer(index).every(value => value === 255), 'Fill did not change state.');
+        }
+        check(api.runtime_reset_scene() === 0, 'Reset failed.');
+        for (let index = 0; index < 3; index += 1) check(buffer(index).every(value => value === 0), 'Reset left data.');
+      });
+      test('120 ported frame-counter updates', () => {
+        for (let frame = 1; frame <= 120; frame += 1) check(api.runtime_step(frame * 16667) === 0, 'Frame failed.');
+        check(api.runtime_frame_count() === 120 && api.runtime_time() === 2000040, 'Frame state mismatch.');
+      });
+      test('low-counter rollover preserves 64-bit time', () => {
+        for (const ticks of [0xFFFFFFFF, 0x100000000, 0x10000007B]) {
+          check(api.runtime_step(ticks) === 0 && api.runtime_time() === ticks, 'Clock rollover failed.');
+        }
+      });
+      test('invalid input leaves state unchanged', () => {
+        const before = api.runtime_frame_count();
+        check(api.runtime_step(-1) === -1 && api.runtime_step(NaN) === -1, 'Invalid clock accepted.');
+        check(api.runtime_fill(0, 0, 256, 4) === -1, 'Out-of-range write accepted.');
+        check(api.runtime_frame_count() === before && api.runtime_guards_valid() === 1, 'Rejected input changed state.');
+      });
+      check(api.runtime_init() === 0, 'Reinitialization failed.');
+      origin = performance.now();
+      for (let index = 0; index < 3; index += 1) {
+        const row = document.createElement('tr');
+        for (const value of [index, api.runtime_buffer_size(index), `0x${api.runtime_buffer_address(index).toString(16)}`]) {
+          const cell = document.createElement('td');
+          cell.textContent = String(value);
+          row.append(cell);
+        }
+        element('buffers').append(row);
+      }
+      display();
+      status.textContent = `${passed} browser checks passed.`;
+      document.body.dataset.result = 'passed';
+      document.body.dataset.passed = String(passed);
+      running.disabled = false;
+      reset.disabled = false;
+      element('disc').disabled = false;
+      element('disc').addEventListener('change', async event => {
+        const file = event.target.files[0];
+        if (!file) return;
+        discJob?.abort();
+        const job = new AbortController();
+        discJob = job;
+        api.runtime_disc_reset();
+        api.runtime_sky_reset();
+        decoder.wad_reset();
+        element('disc-details').hidden = true;
+        element('archives').replaceChildren();
+        element('boot-modules').replaceChildren();
+        element('cancel-disc').disabled = false;
+        document.body.dataset.disc = 'loading';
+        element('disc-status').textContent = 'Verifying disc, initializing table, and decoding boot and resident archives...';
+        try {
+          const reader = new IsoReader(file);
+          await reader.open(job.signal);
+          const table = await initializeDiscTable(api, reader, job.signal, decoder);
+          job.signal.throwIfAborted();
+          if (discJob !== job) return;
+          element('table-bytes').textContent = table.copiedBytes.toLocaleString();
+          element('table-hash').textContent = table.tableSha256;
+          element('disc-calls').textContent = [0, 1, 2].map(service => api.runtime_disc_service_calls(service)).join(' / ');
+          element('disc-read-bytes').textContent = reader.stats.bytes.toLocaleString();
+          element('disc-guards').textContent = api.runtime_disc_guards_valid() === 1 ? 'Valid' : 'FAILED';
+          element('boot-bytes').textContent = table.bootArchive.bytes.toLocaleString();
+          element('boot-hash').textContent = table.bootArchive.sha256;
+          element('resident-bytes').textContent = table.residentArchive.bytes.toLocaleString();
+          element('resident-hash').textContent = table.residentArchive.sha256;
+          element('resident-classes').textContent = `${table.residentArchive.header.mobyClasses.count} / ${table.residentArchive.header.textureClasses.count}`;
+          element('resident-textures').textContent = String(table.residentArchive.header.textureCount);
+          element('sky-counts').textContent = `${table.residentArchive.sky.shells} / ${table.residentArchive.sky.textures}`;
+          element('sky-guards').textContent = api.runtime_sky_guards_valid() === 1 ? 'Valid' : 'FAILED';
+          element('boot-guards').textContent = decoder.wad_guards_valid() === 1 ? 'Valid' : 'FAILED';
+          for (const entry of table.entries) {
+            const row = document.createElement('tr');
+            for (const value of [entry.name, entry.sector, entry.count, entry.bytes]) {
+              const cell = document.createElement('td');
+              cell.textContent = String(value);
+              row.append(cell);
+            }
+            element('archives').append(row);
+          }
+          for (const entry of table.bootArchive.modules) {
+            const row = document.createElement('tr');
+            for (const value of [entry.index, entry.offset, entry.bytes, 'ELF32 MIPS']) {
+              const cell = document.createElement('td');
+              cell.textContent = String(value);
+              row.append(cell);
+            }
+            element('boot-modules').append(row);
+          }
+          element('disc-details').hidden = false;
+          element('disc-status').textContent = 'Original C disc table initialized; archives decoded; original C resident sky relocated.';
+          document.body.dataset.disc = 'ready';
+        } catch (error) {
+          if (discJob !== job) return;
+          api.runtime_disc_reset();
+          api.runtime_sky_reset();
+          decoder.wad_reset();
+          document.body.dataset.disc = job.signal.aborted ? 'cancelled' : 'error';
+          element('disc-status').textContent = job.signal.aborted ? 'Disc initialization cancelled.' : error.message;
+        } finally {
+          if (discJob === job) element('cancel-disc').disabled = true;
+        }
+      });
+      element('cancel-disc').addEventListener('click', () => {
+        discJob?.abort();
+        element('cancel-disc').disabled = true;
+        element('disc-status').textContent = 'Cancelling disc initialization...';
+      });
+      running.addEventListener('change', () => {
+        cancelAnimationFrame(frameId);
+        document.body.dataset.clock = running.checked ? 'running' : 'stopped';
+        if (running.checked) frameId = requestAnimationFrame(frame);
+      });
+      reset.addEventListener('click', () => {
+        try {
+          check(api.runtime_reset_scene() === 0, 'Scene reset rejected state.');
+          display();
+        } catch (error) {
+          failure(error);
+        }
+      });
+      addEventListener('pagehide', () => {
+        cancelAnimationFrame(frameId);
+        discJob?.abort();
+      });
+    } catch (error) {
+      failure(error);
+    }
+  </script>
+</body>
+</html>

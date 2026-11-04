@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Original C / WebAssembly Smoke Test</title>
+</head>
+<body data-result="running">
+  <h1>Original C / WebAssembly Smoke Test</h1>
+  <p id="status" role="status">Running...</p>
+  <pre id="results"></pre>
+  <script type="module">
+    const status = document.getElementById('status');
+    const results = document.getElementById('results');
+    let passed = 0;
+
+    function equal(actual, expected, label) {
+      if (!Object.is(actual, expected)) {
+        throw new Error(`${label}: expected ${expected}, received ${actual}`);
+      }
+    }
+
+    function test(label, check) {
+      check();
+      passed += 1;
+      results.textContent += `PASS: ${label}\n`;
+    }
+
+    try {
+      const response = await fetch('./approach-value.wasm');
+      if (!response.ok) throw new Error(`WebAssembly request failed: ${response.status}`);
+      const { instance } = await WebAssembly.instantiate(await response.arrayBuffer(), {});
+      const api = instance.exports;
+      const cases = [
+        ['increase', 0, 10, 2, 2, 8],
+        ['decrease', 10, 0, 2, 8, 8],
+        ['clamp upward', 9, 10, 2, 10, 0],
+        ['clamp downward', 1, 0, 2, 0, 0],
+        ['already at target', 5, 5, 2, 5, 0],
+        ['zero step', 2, 10, 0, 2, 8],
+        ['negative values', -10, -5, 2, -8, 3],
+        ['fractional step', 0.25, 1, 0.125, 0.375, 0.625],
+      ];
+
+      for (const [label, initial, target, step, expectedValue, expectedRemaining] of cases) {
+        test(label, () => {
+          api.smoke_set_value(initial);
+          equal(api.smoke_step(target, step), expectedRemaining, 'remaining distance');
+          equal(api.smoke_get_value(), expectedValue, 'updated value');
+        });
+      }
+
+      test('repeated updates reach target', () => {
+        api.smoke_set_value(0);
+        for (let frame = 0; frame < 5; frame += 1) api.smoke_step(9, 2);
+        equal(api.smoke_get_value(), 9, 'updated value');
+        equal(api.smoke_step(9, 2), 0, 'remaining distance');
+      });
+
+      test('portable absolute_float', () => {
+        equal(api.smoke_absolute(-3.5), 3.5, 'negative value');
+        equal(api.smoke_absolute(3.5), 3.5, 'positive value');
+        equal(api.smoke_absolute(-0), 0, 'negative zero');
+        equal(api.smoke_absolute(-Infinity), Infinity, 'negative infinity');
+        equal(Number.isNaN(api.smoke_absolute(NaN)), true, 'NaN');
+      });
+
+      status.textContent = `${passed} tests passed.`;
+      document.body.dataset.result = 'passed';
+      document.body.dataset.passed = String(passed);
+    } catch (error) {
+      status.textContent = 'FAILED';
+      results.textContent += `${error.stack || error}\n`;
+      document.body.dataset.result = 'failed';
+      console.error(error);
+    }
+  </script>
+</body>
+</html>

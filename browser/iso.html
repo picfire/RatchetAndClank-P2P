@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Ratchet &amp; Clank / Disc Inspector</title>
+  <style>
+    :root { color-scheme: light; --ink: #202a25; --muted: #59665f; --line: #cdd8d0; --accent: #136440; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f8f6; color: var(--ink); font: 14px/1.5 "Courier New", monospace; }
+    main { max-width: 1040px; margin: auto; padding: 32px 20px; }
+    header { border-bottom: 2px solid var(--ink); padding-bottom: 20px; }
+    h1 { font-size: 24px; margin: 0 0 20px; }
+    h2 { font-size: 18px; margin: 0 0 12px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+    label { display: grid; gap: 6px; flex: 1 1 300px; min-width: 0; }
+    input { width: 100%; min-width: 0; font: inherit; }
+    button, input::file-selector-button { font: inherit; padding: 7px 12px; border: 1px solid var(--line); border-radius: 4px; background: #fff; color: var(--accent); cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    #status { min-height: 24px; overflow-wrap: anywhere; }
+    body[data-state="error"] #status { color: #a32626; }
+    section { padding: 24px 0; border-bottom: 1px solid var(--line); }
+    dl { display: grid; grid-template-columns: minmax(100px, 160px) minmax(0, 1fr); gap: 8px 16px; margin: 0; }
+    dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 8px; text-align: left; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: normal; }
+    td:first-child { overflow-wrap: anywhere; min-width: 130px; }
+    td:not(:first-child) { white-space: nowrap; }
+    pre { margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+    [hidden] { display: none; }
+    @media (max-width: 540px) { main { padding: 20px 12px; } h1 { font-size: 20px; } dl { grid-template-columns: 1fr; gap: 2px; } dd { margin-bottom: 8px; } }
+  </style>
+</head>
+<body data-state="idle">
+  <main>
+    <header>
+      <h1>Ratchet &amp; Clank / Disc Inspector</h1>
+      <div class="controls">
+        <label for="disc">Local USA disc image<input id="disc" type="file" accept=".iso"></label>
+        <button id="cancel" type="button" disabled>Cancel</button>
+      </div>
+      <p id="status" role="status" aria-live="polite">No disc selected.</p>
+    </header>
+    <section id="details" hidden>
+      <h2>Verified disc</h2>
+      <dl>
+        <dt>File</dt><dd id="filename"></dd>
+        <dt>Disc bytes</dt><dd id="disc-size"></dd>
+        <dt>Boot SHA-256</dt><dd id="checksum"></dd>
+        <dt>Read budget</dt><dd id="read-stats"></dd>
+      </dl>
+    </section>
+    <section id="catalog" hidden>
+      <h2>Disc files</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Path</th><th scope="col">Sector</th><th scope="col">Bytes</th><th scope="col">Read</th></tr></thead>
+          <tbody id="files"></tbody>
+        </table>
+      </div>
+    </section>
+    <section id="preview" hidden>
+      <h2 id="preview-title">Sector preview</h2>
+      <dl><dt>SHA-256</dt><dd id="preview-checksum"></dd></dl>
+      <pre id="hex"></pre>
+    </section>
+  </main>
+  <script type="module">
+    import { IsoReader, SECTOR_BYTES } from './iso-reader.mjs';
+
+    const element = id => document.getElementById(id);
+    const status = element('status');
+    const cancel = element('cancel');
+    let active;
+    let reader;
+
+    function begin() {
+      active?.abort();
+      active = new AbortController();
+      cancel.disabled = false;
+      return active;
+    }
+
+    function reportStats() {
+      element('read-stats').textContent = `${reader.stats.bytes.toLocaleString()} bytes read; largest request ${reader.stats.largestRead.toLocaleString()} bytes`;
+    }
+
+    function failure(error, job) {
+      if (active !== job) return;
+      document.body.dataset.state = job.signal.aborted ? 'cancelled' : 'error';
+      status.textContent = job.signal.aborted ? 'Read cancelled.' : error.message;
+    }
+
+    async function inspect(entry) {
+      const currentReader = reader;
+      const job = begin();
+      element('preview').hidden = true;
+      document.body.dataset.state = 'reading';
+      status.textContent = `Reading ${entry.path}...`;
+      try {
+        const bytes = await currentReader.read(entry.sector * SECTOR_BYTES, Math.min(entry.size, SECTOR_BYTES), job.signal);
+        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+        job.signal.throwIfAborted();
+        if (active !== job) return;
+        element('preview-title').textContent = `${entry.path} / first sector`;
+        element('preview-checksum').textContent = [...digest].map(value => value.toString(16).padStart(2, '0')).join('');
+        const lines = [];
+        for (let offset = 0; offset < Math.min(bytes.length, 256); offset += 16) {
+          lines.push(`${offset.toString(16).padStart(4, '0')}  ${[...bytes.subarray(offset, offset + 16)].map(value => value.toString(16).padStart(2, '0')).join(' ')}`);
+        }
+        element('hex').textContent = lines.join('\n');
+        element('preview').hidden = false;
+        reportStats();
+        document.body.dataset.state = 'verified';
+        status.textContent = `${bytes.length.toLocaleString()} bytes read from ${entry.path}.`;
+      } catch (error) {
+        failure(error, job);
+      } finally {
+        if (active === job) cancel.disabled = true;
+      }
+    }
+
+    element('disc').addEventListener('change', async event => {
+      const file = event.target.files[0];
+      if (!file) return;
+      const job = begin();
+      reader = undefined;
+      for (const id of ['details', 'catalog', 'preview']) element(id).hidden = true;
+      element('files').replaceChildren();
+      document.body.dataset.state = 'loading';
+      status.textContent = 'Reading directory and verifying USA executable...';
+      try {
+        const selected = new IsoReader(file);
+        await selected.open(job.signal);
+        const verified = await selected.verifyBoot(job.signal);
+        if (active !== job) return;
+        reader = selected;
+        element('filename').textContent = file.name;
+        element('disc-size').textContent = file.size.toLocaleString();
+        element('checksum').textContent = verified.sha256;
+        reportStats();
+        for (const entry of selected.entries) {
+          const row = document.createElement('tr');
+          for (const value of [entry.path, entry.sector, entry.size]) {
+            const cell = document.createElement('td');
+            cell.textContent = String(value);
+            row.append(cell);
+          }
+          const action = document.createElement('td');
+          if (!entry.directory) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = 'Inspect';
+            button.setAttribute('aria-label', `Inspect ${entry.path}`);
+            button.addEventListener('click', () => inspect(entry));
+            action.append(button);
+          }
+          row.append(action);
+          element('files').append(row);
+        }
+        element('details').hidden = false;
+        element('catalog').hidden = false;
+        document.body.dataset.state = 'verified';
+        status.textContent = `USA executable verified. ${selected.entries.length} disc entries.`;
+      } catch (error) {
+        failure(error, job);
+      } finally {
+        if (active === job) cancel.disabled = true;
+      }
+    });
+
+    cancel.addEventListener('click', () => {
+      active?.abort();
+      status.textContent = 'Cancelling read...';
+      cancel.disabled = true;
+    });
+  </script>
+</body>
+</html>
