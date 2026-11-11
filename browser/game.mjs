@@ -6,7 +6,7 @@ import { readSkyGeometry, readSkyTextures } from './sky-geometry.mjs';
 import { loadPlanetCore, VELDIN_ARCHIVE, initializePlanetCollision } from './level-loader.mjs';
 import { readTerrainGeometry, readTerrainTextures, readMobyTextures } from './terrain-geometry.mjs';
 import { readMobyGeometry } from './moby-geometry.mjs';
-import { readHeroAnimationRig } from './moby-animation.mjs';
+import { HeroSwingState, readHeroAnimationRig, sampleHeroAnimationFrame } from './moby-animation.mjs';
 
 const canvas = document.querySelector('canvas');
 const status = document.querySelector('#status');
@@ -41,6 +41,7 @@ let heroActive = false;
 let previousTime;
 let tickRemainder = 0;
 let jumpQueued = false;
+let swingRequested = false;
 let heroAnimation;
 const keys = new Set();
 const touchKeys = new Map();
@@ -49,12 +50,18 @@ const movement = new THREE.Vector3();
 const forward = new THREE.Vector3();
 const followDelta = new THREE.Vector3();
 const controlKeys = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft',
-  'ArrowDown', 'ArrowRight', 'Space', 'ShiftLeft', 'ShiftRight', 'KeyR']);
+  'ArrowDown', 'ArrowRight', 'Space', 'ShiftLeft', 'ShiftRight', 'KeyR', 'KeyF',
+  'KeyC', 'ControlLeft', 'ControlRight']);
 
 function releaseInput() {
   keys.clear();
   touchKeys.clear();
+  heroAnimation?.swing.reset();
+  collision?.runtime_hero_control_slam(0);
+  collision?.runtime_hero_control_crouch(0);
+  collision?.runtime_hero_control_jump_release();
   jumpQueued = false;
+  swingRequested = false;
   tickRemainder = 0;
   previousTime = undefined;
 }
@@ -64,11 +71,13 @@ addEventListener('keydown', event => {
       event.target instanceof Element && event.target.closest('input, button, select, textarea')) return;
   event.preventDefault();
   if (event.code === 'Space' && !event.repeat) jumpQueued = true;
+  if (event.code === 'KeyF' && !event.repeat) requestSwing();
   if (event.code === 'KeyR' && !event.repeat) resetHero();
   keys.add(event.code);
 });
 addEventListener('keyup', event => {
   keys.delete(event.code);
+  if (event.code === 'Space' && !pressed('Space')) collision?.runtime_hero_control_jump_release();
   if (heroActive && controlKeys.has(event.code)) event.preventDefault();
 });
 addEventListener('blur', releaseInput);
@@ -84,14 +93,23 @@ for (const button of document.querySelectorAll('[data-control]')) {
     const code = button.dataset.control;
     touchKeys.set(event.pointerId, code);
     if (code === 'Space') jumpQueued = true;
+    if (code === 'KeyF') requestSwing();
     if (code === 'KeyR') resetHero();
   });
   for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
-    button.addEventListener(name, event => touchKeys.delete(event.pointerId));
+    button.addEventListener(name, event => {
+      const code = touchKeys.get(event.pointerId);
+      touchKeys.delete(event.pointerId);
+      if (code === 'Space' && !pressed('Space')) collision?.runtime_hero_control_jump_release();
+    });
   }
 }
 
 function pressed(code) { return keys.has(code) || [...touchKeys.values()].includes(code); }
+
+function requestSwing() {
+  swingRequested = true;
+}
 
 function resetHero() {
   releaseInput();
@@ -116,8 +134,14 @@ function syncHero() {
 export function readHeroState() {
   return { active: heroActive, position: characterGroup.position.toArray(),
     yaw: characterGroup.rotation.z, grounded: Boolean(collision?.runtime_hero_control_grounded()),
+    crouched: Boolean(collision?.runtime_hero_control_crouched()),
+    jumps: collision?.runtime_hero_control_jump_count() ?? 0,
+    verticalSpeed: collision?.runtime_hero_locomotion_velocity(2) ?? 0,
     animation: heroAnimation ? { sequence: heroAnimation.sequence,
       time: heroAnimation.actions.get(heroAnimation.sequence)?.time,
+      sourceFrame: heroAnimation.frames.has(heroAnimation.sequence) ? sampleHeroAnimationFrame(
+        heroAnimation.frames.get(heroAnimation.sequence), heroAnimation.actions.get(heroAnimation.sequence).time).sourceFrame : null,
+      swing: heroAnimation.swing.sequence ?? null, queued: heroAnimation.swing.queued,
       pose: heroAnimation.bones[8].quaternion.toArray() } : null,
     camera: camera.position.toArray(), target: controls.target.toArray() };
 }
@@ -141,10 +165,25 @@ function updateHero(time) {
   const inputLength = Math.max(Math.hypot(inputX, inputY), 1);
   while (tickRemainder >= 1 / 60) {
     const jump = jumpQueued || pressed('Space');
-    const result = collision.runtime_hero_control_step(inputX / inputLength, inputY / inputLength,
+    const crouch = pressed('KeyC') || pressed('ControlLeft') || pressed('ControlRight');
+    const stance = collision.runtime_hero_control_crouch(Number(crouch && heroAnimation?.swing.sequence !== 43));
+    if (stance !== 0) throw new Error(`Native crouch input failed (${stance}).`);
+    if (jump && heroAnimation?.swing.sequence !== 43) heroAnimation?.swing.reset();
+    heroAnimation?.swing.update(Boolean(collision.runtime_hero_control_grounded()));
+    const movementScale = heroAnimation?.swing.sequence === undefined ? 1 : 0;
+    const result = collision.runtime_hero_control_step(inputX / inputLength * movementScale, inputY / inputLength * movementScale,
       Number(jump), Number(keys.has('ShiftLeft') || keys.has('ShiftRight')));
     jumpQueued = false;
     if (result !== 0) throw new Error(`Native hero step failed (${result}).`);
+    const grounded = Boolean(collision.runtime_hero_control_grounded());
+    heroAnimation?.swing.update(grounded);
+    if (swingRequested) {
+      if (heroAnimation?.swing.request(grounded, Boolean(collision.runtime_hero_control_crouched())) && !grounded) {
+        const slam = collision.runtime_hero_control_slam(1);
+        if (slam !== 0) throw new Error(`Native hero slam failed (${slam}).`);
+      }
+      swingRequested = false;
+    }
     tickRemainder -= 1 / 60;
   }
   syncHero();
@@ -155,7 +194,19 @@ function updateHero(time) {
 function updateHeroAnimation(elapsed) {
   if (!heroAnimation) return;
   const speed = collision.runtime_hero_locomotion_speed() * 60;
-  const sequence = collision.runtime_hero_control_grounded() ? (speed > 0.1 ? 4 : 0) : 7;
+  const grounded = collision.runtime_hero_control_grounded();
+  const crouched = collision.runtime_hero_control_crouched();
+  heroAnimation.swing.update(Boolean(grounded));
+  let sequence;
+  if (heroAnimation.swing.sequence !== undefined) sequence = heroAnimation.swing.sequence;
+  else if (crouched) sequence = 13;
+  else if (grounded) {
+    if (speed > 0.1) sequence = 4;
+    else sequence = 0;
+  } else {
+    if (collision.runtime_hero_control_jump_count() === 2) sequence = 22;
+    else sequence = 7;
+  }
   const { mixer, actions } = heroAnimation;
   const action = actions.get(sequence);
   if (heroAnimation.sequence !== sequence) {
@@ -163,7 +214,19 @@ function updateHeroAnimation(elapsed) {
     action.reset().fadeIn(0.12).play();
     heroAnimation.sequence = sequence;
   }
-  action.timeScale = sequence === 4 ? Math.max(0.35, speed / 5.7) : sequence === 7 ? 3.2 : 1;
+  action.timeScale = sequence === 4 ? Math.max(0.35, speed / 5.7) : 1;
+  if (sequence === 7 || sequence === 22) {
+    const pose = sampleHeroAnimationFrame(heroAnimation.frames.get(sequence), action.time);
+    const rate = collision.runtime_hero_jump_animation_speed(pose.sourceFrame, pose.rate);
+    if (!Number.isFinite(rate) || rate <= 0) throw new Error('Invalid native jump animation speed.');
+    action.timeScale = rate;
+  }
+  if (sequence === 43) {
+    const pose = sampleHeroAnimationFrame(heroAnimation.frames.get(sequence), action.time);
+    const rate = collision.runtime_hero_slam_animation_speed(pose.sourceFrame, pose.rate);
+    if (!Number.isFinite(rate) || rate <= 0) throw new Error('Invalid native slam animation speed.');
+    action.timeScale = rate;
+  }
   mixer.update(elapsed);
 }
 
@@ -183,7 +246,7 @@ function createHeroAnimation(rig) {
   for (const [id, frames] of rig.clips) {
     const tracks = [], times = [0];
     for (let frame = 1; frame < frames.length; frame++) times.push(times[frame - 1] + 1 / (60 * frames[frame - 1].rate));
-    if (id !== 7) times.push(times.at(-1) + 1 / (60 * frames.at(-1).rate));
+    if (id === 0 || id === 4 || id === 13) times.push(times.at(-1) + 1 / (60 * frames.at(-1).rate));
     for (let joint = 0; joint < bones.length; joint++) {
       for (const [property, field, width, Track] of [
         ['position', 'positions', 3, THREE.VectorKeyframeTrack],
@@ -200,7 +263,14 @@ function createHeroAnimation(rig) {
     const clip = new THREE.AnimationClip(`hero_${id}`, -1, tracks);
     actions.set(id, { clip });
   }
-  return { bones, skeleton, mixer, actions, sequence: undefined };
+  const swing = new HeroSwingState();
+  mixer.addEventListener('finished', event => {
+    const sequence = Number(event.action.getClip().name.slice(5));
+    if (sequence >= 23 && sequence <= 26 || sequence === 43) {
+      swing.finish(sequence, Boolean(collision.runtime_hero_control_grounded()));
+    }
+  });
+  return { bones, skeleton, mixer, actions, swing, frames: rig.clips, sequence: undefined };
 }
 
 function fitTerrainCamera() {
@@ -283,7 +353,7 @@ function showRatchet(planet) {
   }
   for (const [id, { clip }] of heroAnimation.actions) {
     const action = heroAnimation.mixer.clipAction(clip);
-    if (id === 7) { action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true; }
+    if (id !== 0 && id !== 4 && id !== 13) { action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true; }
     heroAnimation.actions.set(id, action);
   }
   const ray = new THREE.Raycaster(new THREE.Vector3(145, 140, 100), new THREE.Vector3(0, 0, -1));

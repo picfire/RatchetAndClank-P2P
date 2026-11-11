@@ -18,10 +18,15 @@ extern s32 runtime_collision_ready(void);
 extern s32 runtime_collision_segment(f32, f32, f32, f32, f32, f32);
 extern f32 runtime_collision_hit_point(s32);
 extern f32 runtime_collision_hit_normal(s32);
+extern s32 runtime_collision_capsule(f32, f32, f32, f32, f32);
 
 static s32 control_ready;
 static s32 control_grounded;
 static s32 control_jump_held;
+static s32 control_jump_count;
+static s32 control_slam_frame = -1;
+static s32 control_crouch_held;
+static s32 control_crouched;
 
 void clear_u64_value(void *output) { memset(output, 0, 16); }
 
@@ -70,6 +75,8 @@ extern void speed_step(f32 acceleration, f32 deceleration) __asm__("FUN_L00_0021
 extern f32 spring_angle(f32 *angle, f32 *velocity, s32 direction, f32 target,
                         f32 strength, f32 damping, f32 limit) __asm__("FUN_L00_0025bc98");
 extern void build_spherical_offset(f32 *output, f32 length, f32 yaw, f32 pitch) __asm__("FUN_00214db0");
+extern f32 adjust_hero_animation_speed_for_target_frame(f32, f32, f32, f32) __asm__("FUN_L00_00208f20");
+extern f32 control_approach_value(f32 *, f32, f32) __asm__("FUN_00213ed8");
 
 f32 absolute_float(f32 value) { return fabsf(value); }
 f32 fast_cos(f32 radians) { return cosf(radians); }
@@ -145,6 +152,9 @@ s32 runtime_hero_collision_wall_hit(void) { return hero.wall_hit; }
 
 s32 runtime_hero_control_reset(f32 pos_x, f32 pos_y, f32 pos_z) {
     control_ready = control_grounded = control_jump_held = 0;
+    control_jump_count = 0;
+    control_crouch_held = control_crouched = 0;
+    control_slam_frame = -1;
     s32 result = runtime_hero_collision_probe(pos_x, pos_y, pos_z + 0.25f, 0.25f, 0.9f);
     if (result != 1) return result;
     hero.motion.pos.f[2] -= 0.25f;
@@ -158,6 +168,95 @@ s32 runtime_hero_control_reset(f32 pos_x, f32 pos_y, f32 pos_z) {
     return 0;
 }
 
+s32 runtime_hero_control_crouch(s32 held) {
+    if (held != 0 && held != 1) return -2;
+    if (held && (!control_ready || !runtime_collision_ready())) return -1;
+    control_crouch_held = held;
+    return 0;
+}
+
+s32 runtime_hero_control_crouched(void) { return control_ready && control_crouched; }
+
+static s32 control_can_stand(void) {
+    f32 *position = hero.motion.pos.f;
+    return runtime_collision_capsule(position[0], position[1], position[2] + 0.7f,
+                                     0.45f, hero.capsule_radius) == 0;
+}
+
+s32 runtime_hero_control_slam(s32 active) {
+    if (active != 0 && active != 1) return -2;
+    if (!active) {
+        control_slam_frame = -1;
+        return 0;
+    }
+    if (!control_ready || !runtime_collision_ready()) return -1;
+    if (control_grounded || control_slam_frame >= 0) return 1;
+    control_slam_frame = 0;
+    control_jump_count = 2;
+    hero.slam_descending = 0;
+    return 0;
+}
+
+f32 runtime_hero_slam_animation_speed(f32 source_frame, f32 pose_rate) {
+    if (!control_ready || !runtime_collision_ready() || !isfinite(source_frame) ||
+        !isfinite(pose_rate) || source_frame < 0 || source_frame > 255 ||
+        pose_rate <= 0 || pose_rate > 4) return NAN;
+    if (control_grounded) return source_frame < 26 ? 2 : 1;
+    if (hero.slam_descending == 0) return 0.33f;
+    if (source_frame >= 25) return 1;
+    f32 *position = hero.motion.pos.f;
+    if (runtime_collision_segment(position[0], position[1], position[2] + 0.01f,
+        position[0], position[1], position[2] - 64.0f) != 1) return 1;
+    f32 distance = position[2] - runtime_collision_hit_point(2);
+    f32 height = distance, vertical = hero.motion.velocity.f[2];
+    s32 frames = 0;
+    while (height > 0 && frames < 240) {
+        vertical = fmaxf(vertical - 130.0f / 3600.0f, -0.3f);
+        height += vertical;
+        frames++;
+    }
+    if (frames == 0) return 1;
+    hero.anim_frame = source_frame;
+    hero.anim_frame_rate = pose_rate;
+    hero.anim_changing = 0;
+    adjust_hero_animation_speed_for_target_frame(26, (f32)frames, 0.5f, -1);
+    if (distance < 0.7f && hero.anim_speed < 0.75f) hero.anim_speed = 0.75f;
+    return hero.anim_speed;
+}
+
+s32 runtime_hero_control_jump_count(void) { return control_ready ? control_jump_count : 0; }
+void runtime_hero_control_jump_release(void) { control_jump_held = 0; }
+
+f32 runtime_hero_jump_animation_speed(f32 source_frame, f32 pose_rate) {
+    if (!control_ready || !runtime_collision_ready() || !isfinite(source_frame) ||
+        !isfinite(pose_rate) || source_frame < 0 || source_frame > 255 ||
+        pose_rate <= 0 || pose_rate > 4) return NAN;
+    f32 vertical = hero.motion.velocity.f[2];
+    f32 target = control_jump_count == 2 ? 32 : 18;
+    s32 frames = 1;
+    if (vertical > 0) {
+        frames = (s32)ceilf(vertical / hero.jump_gravity);
+    } else {
+        target = control_jump_count == 2 ? 43 : 30;
+        f32 *position = hero.motion.pos.f;
+        if (runtime_collision_segment(position[0], position[1], position[2] + 0.01f,
+            position[0], position[1], position[2] - 64.0f) != 1) return 1;
+        f32 height = position[2] - runtime_collision_hit_point(2);
+        frames = 0;
+        while (height > 0 && frames < 240) {
+            vertical = fmaxf(vertical - hero.fall_gravity, -0.3f);
+            height += vertical;
+            frames++;
+        }
+    }
+    if (source_frame >= target || frames <= 0) return 1;
+    hero.anim_frame = source_frame;
+    hero.anim_frame_rate = pose_rate;
+    hero.anim_changing = 0;
+    adjust_hero_animation_speed_for_target_frame(target, (f32)frames, 0.5f, -1);
+    return hero.anim_speed;
+}
+
 s32 runtime_hero_control_step(f32 input_x, f32 input_y, s32 jump, s32 walk) {
     if (!control_ready || !runtime_collision_ready()) return -1;
     if (!isfinite(input_x) || !isfinite(input_y) || fabsf(input_x) > 1 || fabsf(input_y) > 1 ||
@@ -165,17 +264,53 @@ s32 runtime_hero_control_step(f32 input_x, f32 input_y, s32 jump, s32 walk) {
     f32 old_position[4];
     memcpy(old_position, hero.motion.pos.f, sizeof(old_position));
     f32 vertical = hero.motion.velocity.f[2];
+    s32 crouch = control_crouch_held && control_grounded && control_slam_frame < 0;
+    if (!crouch && control_crouched && !control_can_stand()) crouch = 1;
+    control_crouched = crouch;
+    control_approach_value(&hero.capsule_top, crouch ? 0.7f : 1.15f, 0.02f);
     f32 magnitude = hypotf(input_x, input_y);
     f32 yaw = magnitude > 0.001f ? atan2f(input_y, input_x) : hero.motion.move_yaw;
-    f32 speed = fminf(magnitude, 1.0f) * (walk ? 2.5f : 5.7f) / 60.0f;
-    runtime_hero_locomotion_step(speed, yaw, 20.0f / 3600.0f, 30.0f / 3600.0f,
-                               0.12f, 0.65f, 0.35f);
-    if (jump && !control_jump_held && control_grounded) {
-        vertical = sqrtf(2.0f * 29.7f * 1.47f) / 60.0f;
+    f32 speed = control_slam_frame >= 0 || crouch ? 0 : fminf(magnitude, 1.0f) * (walk ? 2.5f : 5.7f) / 60.0f;
+    runtime_hero_locomotion_step(speed, yaw, 20.0f / 3600.0f, (crouch ? 6.48f : 30.0f) / 3600.0f,
+                               crouch ? 0.002f : 0.12f, crouch ? 0.07f : 0.65f,
+                               crouch ? 6.981317f / 60.0f : 0.35f);
+    if (jump && !control_jump_held && (control_grounded || control_jump_count == 1) && control_slam_frame < 0 &&
+        (!crouch || control_can_stand())) {
+        f32 height = 1.47f;
+        if (!control_grounded) {
+            height = 0.7f;
+            f32 *position = hero.motion.pos.f;
+            if (runtime_collision_segment(position[0], position[1], position[2] + 0.01f,
+                position[0], position[1], position[2] - 64.0f) == 1) {
+                f32 distance = fmaxf(0, position[2] - runtime_collision_hit_point(2));
+                if (distance < 2) height += (2.5f - distance) * 0.5f;
+            }
+        }
+        control_jump_count = control_grounded ? 1 : 2;
+        hero.jump_gravity = 29.7f / 3600.0f;
+        hero.fall_gravity = hero.jump_gravity * (control_jump_count == 2 ? 1 : 1.17f);
+        control_crouched = 0;
+        hero.capsule_top = 1.15f;
+        vertical = sqrtf(2.0f * 29.7f * height) / 60.0f;
         control_grounded = 0;
     }
     control_jump_held = jump;
-    if (!control_grounded) vertical -= vertical > 0 ? hero.jump_gravity : hero.fall_gravity;
+    if (control_slam_frame >= 0 && !control_grounded) {
+        if (control_slam_frame < 9) {
+            f32 target = 7.7f / 60.0f;
+            f32 *position = hero.motion.pos.f;
+            if (runtime_collision_segment(position[0], position[1], position[2] + 0.01f,
+                position[0], position[1], position[2] - 64.0f) == 1) {
+                f32 distance = position[2] - runtime_collision_hit_point(2);
+                if (distance > 2.25f) target *= 0.5f;
+                else if (distance > 1.8f) target *= 0.7f;
+            }
+            f32 change = 150.0f / 3600.0f;
+            vertical += fmaxf(-change, fminf(change, target - vertical));
+        } else if (control_slam_frame > 14) vertical -= 130.0f / 3600.0f;
+        if (control_slam_frame < 15) control_slam_frame++;
+        if (vertical < 0) hero.slam_descending = 1;
+    } else if (!control_grounded) vertical -= vertical > 0 ? hero.jump_gravity : hero.fall_gravity;
     else vertical = 0;
     hero.motion.velocity.f[2] = fmaxf(vertical, -0.3f);
     hero.wall_hit = 0;
@@ -197,6 +332,10 @@ s32 runtime_hero_control_step(f32 input_x, f32 input_y, s32 jump, s32 walk) {
             hero.motion.velocity.f[2] = 0;
             control_grounded = 1;
         }
+    }
+    if (control_grounded) {
+        control_slam_frame = -1;
+        control_jump_count = 0;
     }
     hero.air_frames.s = control_grounded ? 0 : 1;
     return 0;

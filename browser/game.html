@@ -23,7 +23,7 @@
     .direction-pad [data-control="KeyA"] { grid-area: 2 / 1; }
     .direction-pad [data-control="KeyS"] { grid-area: 2 / 2; }
     .direction-pad [data-control="KeyD"] { grid-area: 2 / 3; }
-    .touch-actions { display: flex; gap: 10px; padding-bottom: 47px; }
+    .touch-actions { display: grid; grid-template: repeat(2, 56px) / repeat(2, 56px); gap: 8px; align-items: center; justify-items: center; }
     .touch-actions [data-control="Space"] { width: 56px; height: 56px; }
     @media (max-width: 600px), (pointer: coarse) { body[data-state="rendering"] .touch-controls { display: flex; } }
     body[data-state="error"] #status { color: #ff9a87; }
@@ -44,6 +44,8 @@
     </div>
     <div class="touch-actions">
       <button type="button" data-control="KeyR" aria-label="Reset position" title="Reset position">&#8634;</button>
+      <button type="button" data-control="KeyC" aria-label="Crouch" title="Crouch">&#8595;</button>
+      <button type="button" data-control="KeyF" aria-label="Swing" title="Swing">&#9876;</button>
       <button type="button" data-control="Space" aria-label="Jump" title="Jump">&#10514;</button>
     </div>
   </div>

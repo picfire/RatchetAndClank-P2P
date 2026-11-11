@@ -9,7 +9,7 @@
 # install the toolchain (docs/build/building.md). Then run `make elf`.
 
 .DEFAULT_GOAL := check
-.PHONY: elf iso clean-iso check progress overlays format browser-smoke browser-assets browser-assets-test
+.PHONY: elf iso clean-iso check progress overlays format lint browser-smoke browser-assets browser-assets-test
 .PHONY: browser-runtime browser-runtime-test
 .PHONY: browser-wad browser-wad-test browser-game browser-hero browser-collision browser-collision-test
 
@@ -40,6 +40,8 @@ browser-hero: ## Build native hero locomotion/collision; compile additional fram
 	$(EMCC) $(BROWSER_HERO_CFLAGS) \
 	  -c src/overlays/shared/hero/hero_frame_update.c -o build/browser/hero-ground.o
 	$(EMCC) $(BROWSER_HERO_CFLAGS) \
+	  -c src/overlays/shared/hero/hero_idle_sequence.c -o build/browser/hero-timing.o
+	$(EMCC) $(BROWSER_HERO_CFLAGS) \
 	  '-Dapproach_value(target,step,value)=approach_value(value,target,step)' \
 	  -c src/math/interpolation/approach_value.c -o build/browser/hero-approach.o
 	$(EMCC) $(BROWSER_HERO_CFLAGS) \
@@ -51,10 +53,10 @@ browser-hero: ## Build native hero locomotion/collision; compile additional fram
 	  -c src/camera/build_spherical_offset.c -o build/browser/hero-spherical.o
 	$(EMCC) -O2 -flto -Wall -Wextra -Werror -Ibrowser/include -Iinclude browser/hero.c browser/collision.c \
 	  src/world/collision/probe_ground_height.c \
-	  build/browser/hero-collision.o build/browser/hero-approach.o build/browser/hero-angle.o build/browser/hero-damping.o build/browser/hero-spherical.o \
+	  build/browser/hero-collision.o build/browser/hero-approach.o build/browser/hero-angle.o build/browser/hero-damping.o build/browser/hero-spherical.o build/browser/hero-timing.o \
 	  --no-entry -sSTANDALONE_WASM=1 -sFILESYSTEM=0 -sERROR_ON_UNDEFINED_SYMBOLS=1 \
 	  -sINITIAL_MEMORY=16777216 \
-	  -sEXPORTED_FUNCTIONS='["_runtime_hero_control_reset","_runtime_hero_control_step","_runtime_hero_control_grounded","_runtime_hero_locomotion_reset","_runtime_hero_locomotion_step","_runtime_hero_locomotion_speed","_runtime_hero_locomotion_yaw","_runtime_hero_locomotion_yaw_rate","_runtime_hero_locomotion_velocity","_runtime_hero_collision_probe","_runtime_hero_collision_position","_runtime_hero_collision_wall_hit","_runtime_collision_reset","_runtime_collision_stage_address","_runtime_collision_capacity","_runtime_collision_load","_runtime_collision_guards_valid","_runtime_collision_cells","_runtime_collision_faces","_runtime_collision_segment","_runtime_collision_capsule","_runtime_collision_hit_position","_runtime_collision_hit_point","_runtime_collision_hit_normal","_runtime_collision_hit_material"]' \
+	  -sEXPORTED_FUNCTIONS='["_runtime_hero_control_reset","_runtime_hero_control_step","_runtime_hero_control_jump_count","_runtime_hero_control_jump_release","_runtime_hero_jump_animation_speed","_runtime_hero_control_crouch","_runtime_hero_control_crouched","_runtime_hero_control_slam","_runtime_hero_slam_animation_speed","_runtime_hero_control_grounded","_runtime_hero_locomotion_reset","_runtime_hero_locomotion_step","_runtime_hero_locomotion_speed","_runtime_hero_locomotion_yaw","_runtime_hero_locomotion_yaw_rate","_runtime_hero_collision_probe","_runtime_hero_collision_position","_runtime_hero_collision_wall_hit","_runtime_collision_reset","_runtime_collision_stage_address","_runtime_collision_capacity","_runtime_collision_load","_runtime_collision_guards_valid","_runtime_collision_cells","_runtime_collision_faces","_runtime_collision_segment","_runtime_collision_capsule","_runtime_collision_hit_position","_runtime_collision_hit_point","_runtime_collision_hit_normal","_runtime_collision_hit_material","_runtime_hero_locomotion_velocity"]' \
 	  -o build/browser/hero-locomotion.wasm
 
 browser-collision-test: browser-hero ## Check static capsule queries and the original hero resolver
@@ -138,6 +140,9 @@ check: ## Run the public CI checks locally (tests, script parse, progress report
 
 format: ## Format the C sources the human-first way (scripts/format.py)
 	python3 scripts/format.py
+
+lint: ## Lint browser JavaScript and spell-check browser comments and maintained docs
+	npm run lint
 
 progress: ## After `make elf`: measure C_FUZZY and preview the report and map in build/progress/
 	.venv/bin/python scripts/progress-report.py --workspace build/baseline

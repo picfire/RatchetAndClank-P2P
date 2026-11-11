@@ -1,5 +1,67 @@
 import { readMobyClass } from './moby-geometry.mjs';
 
+export function sampleHeroAnimationFrame(frames, time) {
+  let start = 0;
+  for (let index = 0; index < frames.length - 1; index++) {
+    const duration = 1 / (60 * frames[index].rate);
+    if (time < start + duration) {
+      const blend = Math.max(0, (time - start) / duration);
+      return { sourceFrame: frames[index].sourceFrame * (1 - blend) + frames[index + 1].sourceFrame * blend,
+        rate: frames[index].rate };
+    }
+    start += duration;
+  }
+  return { sourceFrame: frames.at(-1).sourceFrame, rate: frames.at(-1).rate };
+}
+
+export class HeroSwingState {
+  sequence;
+  queued = false;
+  finished = false;
+
+  request(grounded, crouched = false) {
+    if (this.sequence === 43 || this.sequence === 26) return false;
+    if (!grounded) {
+      this.sequence = 43;
+      this.queued = false;
+      this.finished = false;
+      return true;
+    }
+    if (crouched) {
+      this.sequence = 26;
+      this.queued = false;
+      return true;
+    }
+    if (this.sequence === undefined) this.sequence = 23;
+    else this.queued = true;
+    return true;
+  }
+
+  update(grounded) {
+    if (this.sequence === 43) {
+      if (grounded && this.finished) this.reset();
+    } else if (!grounded) this.reset();
+  }
+
+  finish(sequence, grounded) {
+    if (sequence !== this.sequence) return;
+    if (sequence === 43 && !grounded) {
+      this.finished = true;
+      return;
+    }
+    if (this.queued && grounded) {
+      this.sequence = 23 + (this.sequence - 23 + 1) % 3;
+      this.queued = false;
+    } else this.reset();
+  }
+
+  reset() {
+    this.sequence = undefined;
+    this.queued = false;
+    this.finished = false;
+  }
+}
+
 export function readHeroSequences(planet) {
   const model = readMobyClass(planet);
   const { base, view, range } = model;
@@ -74,10 +136,11 @@ export function readHeroAnimationRig(planet) {
     }
     const rate = view.getFloat32(offset, true);
     if (!Number.isFinite(rate) || rate <= 0 || rate > 4) throw new Error('Invalid hero pose frame rate.');
-    return { rotations, positions, scales, rate };
+    const sourceFrame = view.getInt16(offset + 4, true) / 16;
+    return { rotations, positions, scales, rate, sourceFrame };
   }
   const clips = new Map();
-  for (const id of [0, 4, 7]) {
+  for (const id of [0, 4, 7, 13, 22, 23, 24, 25, 26, 43]) {
     const sequence = model.sequences[id];
     if (!sequence) throw new Error(`Hero animation ${id} is missing.`);
     clips.set(id, sequence.frames.map(readFrame));

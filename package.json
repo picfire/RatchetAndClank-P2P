@@ -1,0 +1,14 @@
+{
+  "name": "ratchet-and-clank-browser-port",
+  "private": true,
+  "scripts": {
+    "lint": "npm run lint:js && npm run lint:spelling",
+    "lint:js": "eslint \"browser/**/*.mjs\"",
+    "lint:spelling": "codespell --quiet-level=2 browser docs README.md CONTRIBUTING.md AGENTS.md"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.14.0",
+    "globals": "17.14.0"
+  }
+}

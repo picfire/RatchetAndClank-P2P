@@ -50,6 +50,18 @@ be anything the evidence supports.
 
 ## 4. Check
 
+For browser JavaScript and spelling in browser comments and maintained docs,
+install the pinned lint dependencies and run `make lint`:
+
+```sh
+npm ci
+python3 -m pip install codespell==2.4.1
+make lint
+```
+
+The spellcheck intentionally excludes recovered `src/` and `include/` files;
+do not bulk-edit those sources to satisfy browser lint rules.
+
 ```sh
 python3 scripts/format.py           # the project clang-format
 python3 scripts/check-cleanup.py    # the code-cleanup.md rules your change breaks

@@ -10,9 +10,45 @@ or a delivery forecast; stages differ substantially in effort.
 
 Working slice: textured Veldin, sky, and Ratchet; keyboard/touch movement and
 jumping; native static collision; original idle/run/jump animation playback.
+Ground swings and an airborne slam now play from keyboard/touch input, without damage.
+Held crouch and its original crouched swing also work from keyboard/touch input.
 Remaining: full original startup and hero logic, scene objects, gameplay camera,
 combat, audio, HUD, progression, saves, transitions, local co-op, and networking.
 The full game is not yet playable; Stage 3/4 gates remain incomplete.
+
+## Held Crouch Slice
+
+`C`, either Control key, or the held touch crouch button requests crouch.
+Original clip 13 plays while crouched; attacking selects original clip 26.
+The bounded native controller targets zero planar speed but permits turning,
+using the recovered crouch deceleration (6.48), turning constants, and original
+`speed_step`, `spring_angle`, and `approach_value` helpers. The full recovered
+crouch state and capsule-update functions are not executed.
+
+The browser feet-origin capsule keeps its existing radius/bottom and lowers
+its top from 1.15 to 0.70, preserving the original 0.45 reduction rather than
+claiming exact retail dimensions. The original interpolation step is 0.02.
+An upper-capsule clearance query prevents standing or jumping through ceilings;
+release retains crouch if headroom is blocked. Clear-headroom jumping restores
+standing height before takeoff. Reset clears stance; focus loss releases input.
+Clip 13 loops its decoded poses, not the full original queued-animation logic.
+Dedicated crouch-turn clips, high/long jumps, wrench attachment, damage, and
+retail animation/state-machine parity remain unimplemented.
+
+Validation command:
+
+```sh
+RNC_ISO_PATH="$PWD/dumps/Ratchet & Clank (USA) (En,Fr,De,Es,It).iso" make browser-collision-test
+make browser-game
+```
+
+All nine focused checks passed with the local ISO, including a low-ceiling
+fixture, blocked jump, clear release/jump, reset, and crouched swing selection.
+Browser checks verified `C`, Control, blur cleanup, and touch hold/release;
+direct WebGL captures showed standing and held crouch. Mobile rendering was
+nonblank with matching canvas dimensions and no overflow at 390px; direction
+and action controls did not overlap at 351px. Original source trees remain
+unchanged. Stage 3/4 gates and the provisional scope estimate are unchanged.
 
 ## Architecture
 
@@ -406,6 +442,111 @@ node --check browser/moby-animation.mjs
   returns to grounded idle. Existing controls and camera following remain active.
 - ISO and decoded assets remain local/ignored. Full scene rendering, the full
   original frame/animation pipeline, combat, co-op, and P2P are not complete.
+
+## Ground Swing Animation Slice
+
+This ground-only slice was extended by the airborne slam fix recorded below.
+
+The original `hero_set_state.c` selects sequences `0x17 + k` for the three
+ground wrench swings. The bounded pose reader now decodes those original clips
+(23, 24, 25) alongside idle/run/jump. `F` or the touch Swing button plays a
+ground swing once at the stored pose rates. Another press queues at most one
+next swing; keyboard autorepeat does not queue attacks. Horizontal input pauses
+during a swing, while jump, reset, lost focus, and airborne state cancel it.
+
+`HeroSwingState` is a browser animation adapter, not execution of the original
+combat state machine. Queued swings advance at clip completion, not the retail
+attack-record windows. There is no attached wrench model, hit detection, damage,
+breakable object interaction, or sound in this slice. No gameplay gate advances.
+
+Validation on 2026-11-04:
+
+```sh
+RNC_ISO_PATH="$PWD/dumps/Ratchet & Clank (USA) (En,Fr,De,Es,It).iso" \
+  node --test browser/collision.test.mjs
+node --check browser/game.mjs
+make browser-game
+```
+
+- All five focused checks passed with the local USA disc and no skips. Existing
+  native movement/collision checks and finite normalized poses cover all six clips;
+  the swing adapter check covers bounded queuing, completion, and cancellation.
+- Actual browser keyboard execution traced `23 -> 24 -> 25 -> 0`, with changing
+  poses and autorepeat rejected. Jump canceled a swing and airborne input was
+  rejected. Actual touch input traced `23 -> 0` at 390x844.
+- Desktop 1280x800 and mobile 390x844 canvas center samples were nonblank
+  (4096/4096 pixels); no horizontal overflow, and mobile controls fit their bounds.
+  Editor screenshot capture changed viewport/compositor state, so explicit CDP
+  metrics and live canvas sampling were used to verify sizing and rendering.
+- Build, editor diagnostics, cleanup rules, whitespace, and original source-tree
+  preservation checks passed. Only generated `build/browser` is served locally.
+
+## Airborne Slam Input Fix
+
+The ground-only adapter rejected airborne attack requests and reset attacks on
+every held-jump/airborne update. Jump plus attack therefore could not work.
+Requests now wait for the fixed simulation tick: jump is processed before attack,
+so both same-frame key orders select the airborne attack correctly. Ground
+swings still cancel on takeoff; slam sequence 43 persists through landing.
+
+The original `hero_set_state.c` selects `0x2B` for wrench slam. The disc stores
+13 expanded poses at rate 0.25, spanning 0.8 seconds at base playback rate.
+Each pose also stores a signed-16 gameplay-frame marker at byte 4, divided by 16,
+as read by original `compute_interpolated_record_value.c`. These markers run
+from 11 to 35 in steps of 2. Original impact frame 26 maps to 0.5 seconds of
+clip time, not `26 / 60` seconds or stored pose index 26. The initial adapter
+incorrectly froze a middle pose and snapped forward on landing; that behavior
+has been removed. A slam cannot queue itself; reset or lost focus cancels it.
+
+`sampleHeroAnimationFrame` interpolates those source markers from clip time.
+The original unchanged `adjust_hero_animation_speed_for_target_frame` from
+`hero_idle_sequence.c` now links and runs in the native hero module. A bounded
+wrapper uses 0.33-speed wind-up, predicts touchdown with the actual capped
+downward steps, and calls the original helper toward frame 26 during descent.
+Landing uses the original 2x/1x recovery rules without seeking or freezing the
+mixer. This is still an adapter around selected original logic, not the complete
+retail animation evaluator or combat state machine. The recovered owning file
+emits six existing macro-redefinition warnings during compilation.
+
+`runtime_hero_control_slam` adds a bounded world-down phase to the existing native
+controller. It adapts the original movement code's rise through tick 9, drop
+after tick 14, rise target 7.7 units/s, distance-dependent rise reduction, and
+150/130 units/s-squared acceleration values. The existing 0.3-unit downward
+step cap and static collision resolver remain active. This does not execute the
+complete recovered slam function, retail animation-speed predictor, targeting,
+or hit-descriptor path. Wrench attachment, damage, objects, and sound remain absent.
+
+Validation on 2026-11-04:
+
+```sh
+RNC_ISO_PATH="$PWD/dumps/Ratchet & Clank (USA) (En,Fr,De,Es,It).iso" \
+  make browser-collision-test
+make browser-game
+node --check browser/game.mjs
+```
+
+- Seven focused checks pass with no skips, including airborne animation state,
+  native rise/drop/landing, held-jump suppression, cancellation/reset, existing
+  collision/movement checks, and all seven original pose clips from the disc.
+- Desktop 1280x800 execution verifies both same-frame jump/attack orders, delayed
+  attack after jump, airborne and landed sequence 43, and recovery to idle.
+  Holding jump through landing does not repeat it. Actual Veldin landing heights
+  remain within 0.002 units of their starting heights in these stationary checks.
+- Mobile 390x844 two-finger jump/attack traces `0 -> 7 -> 43 -> 0`, recovering
+  grounded without horizontal overflow. Ground combo still traces `23 -> 24 ->
+  25 -> 0`; focus loss during slam recovers without a stuck attack.
+- Desktop canvas sampling is nonblank. Build, editor diagnostics, cleanup,
+  whitespace, and original source-tree preservation checks pass. No gate advances.
+
+Visual timing correction verified on 2026-11-04 with the same commands above:
+eight focused checks pass, including source-marker interpolation, actual disc
+frame 26 at clip time 0.5, and native touchdown near the intended impact frame.
+Desktop pose captures cover wind-up, overhead strike, impact, and recovery;
+direct canvas exports were inspected because editor compositor captures were
+stale. Desktop touchdown measured frame 26.1; real mobile two-finger input at
+390x844 measured frame 27.1, with no frozen pose frames, nonblank pixels, and no
+horizontal overflow. The character remains empty-handed: wrench attachment,
+damage, sound, and retail visual parity are not delivered by this correction.
 
 ## Native Static Collision
 
