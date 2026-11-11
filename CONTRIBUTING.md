@@ -56,7 +56,7 @@ install the pinned lint dependencies and run `make lint`:
 ```sh
 npm ci
 python3 -m pip install codespell==2.4.1
-make lint
+PATH="$(python3 -m site --user-base)/bin:$PATH" make lint
 ```
 
 The spellcheck intentionally excludes recovered `src/` and `include/` files;

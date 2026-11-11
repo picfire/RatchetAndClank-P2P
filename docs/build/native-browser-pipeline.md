@@ -16,43 +16,82 @@ browser-port functionality.
 
 ### Shared Systems
 
-| Area | Verified now | Still needed |
+| Area | Verified now | Next concrete work |
 | --- | --- | --- |
-| Browser build and launch | Selected recovered C and adapters compile to WASM; local page loads user-selected ISO data. | Original game startup and a complete browser runtime. |
-| Disc/assets | Bounded local ISO reads; WAD decoding; Veldin terrain, sky, textures, Ratchet mesh, and selected animation poses are decoded. | General level/mission discovery and loading beyond the hardcoded Veldin archive. |
-| Rendering | Veldin terrain, sky, and skinned Ratchet render through Three.js. | Original render pipeline, scene objects/effects, and parity with PS2 output. |
-| Hero controls | Bounded native C adapter provides movement, jump/double-jump, crouch, and slam motion; static collision is tested. Browser JavaScript selects swing clips and coordinates animation playback. | Full original hero state machine, combat/damage, weapons, dynamic collision, and original gameplay camera. |
-| Mission flow | None verified. The current scene has no implemented mission objectives or completion loop. | Mission actors, objective state, success/failure, restart, exits, saves, and transitions. |
-| Local multiplayer | None. The native hero state is a single global context. | Two independent hero/input contexts and shared-world rules. |
-| P2P | None. | Network synchronization, signaling, authority, recovery, and multiplayer testing. |
+| Browser build/launch | `make browser-game` builds local WASM modules; the page loads a user-selected ISO. | Replace the prototype startup path with the selected original initialization/update slice; keep launch a static browser workflow. |
+| Disc/assets | Bounded ISO reads, WAD decode, and Veldin core extraction work. Veldin geometry has 24,520 terrain triangles across 460 fragments; collision has 5,783 cells. | Generalize archive discovery and loading beyond the hardcoded Veldin entry; inventory required level resources per world. |
+| Rendering/actors | Veldin terrain/sky and one skinned Ratchet model (6,856 triangles) render. | Load world actors/effects and use original scene/render behavior; verify visual parity instead of treating a static scene as a completed level. |
+| Hero/gameplay | One native `Hero` global plus a bounded browser controller supports movement, jump/double-jump, crouch, and slam motion. Selected original poses are decoded; JavaScript selects and plays clips. Static collision is tested. | Port the original hero/gameplay state flow, full combat and damage, dynamic collision, and original gameplay camera. |
+| Mission catalog/flow | 68 per-level mission-menu records resolve to 67 distinct USA-English labels. No browser mission menu, objective state, actor mapping, or completion loop. | Automate catalog extraction, map labels to mission nodes/actors and completion conditions, then implement the Veldin objective. |
+| Audio | No browser audio playback or sound-bank/stream integration. Recovered source exists under `src/audio/voices/`, `src/audio/music/`, and `src/audio/streaming/`. | Inventory the level sound banks and playback paths; implement and test one effects/voice/music path through browser audio before expanding. |
+| HUD/menus | No browser HUD or game menus. | Port the required in-level HUD and mission UI from original text IDs, resources, and state. |
+| Saves/transitions | No browser save adapter, mission restart, or level transition. | Define browser persistence and port the selected level's save/death/restart/exit flow. |
+| Local multiplayer | None. Hero state is one global `struct Hero`. | Separate two hero/input contexts and define shared-world, camera, death, and progression rules. |
+| P2P | None. | Add WebRTC transport/signaling and bounded authoritative state/input sync after local co-op works. |
 
 ### World / Level Ledger
 
-These are level/overlay entries, not a claim that each entry equals exactly one
-mission. “Partial scene” means assets and a limited player-control slice are
-visible; it does not mean the level's mission is playable.
+The 19 names below match the source's `level_select_texts[19]` order and the
+repository's [level metadata](../../config/us/levels/levels.json). The latter
+explicitly calls its planet names/descriptions community reference metadata.
+“Partial scene” means assets and limited controls are visible, not that the
+world or its mission is playable. Save data separately declares 20 level slots;
+do not assume that slot count is the number of named overlays.
 
-| Level | World | Browser-port status |
-| --- | --- | --- |
-| 00 | Veldin | Partial scene/control slice: terrain, sky, Ratchet, static collision, and bounded controls. Mission objectives, level actors, full camera, and completion/transition loop are not implemented. |
-| 01 | Novalis | Not started |
-| 02 | Aridia | Not started |
-| 03 | Kerwan | Not started |
-| 04 | Eudora | Not started |
-| 05 | Rilgar | Not started |
-| 06 | Nebula G34 | Not started |
-| 07 | Umbris | Not started |
-| 08 | Batalia | Not started |
-| 09 | Gaspar | Not started |
-| 10 | Orxon | Not started |
-| 11 | Pokitaru | Not started |
-| 12 | Hoven | Not started |
-| 13 | Oltanis Orbit | Not started |
-| 14 | Oltanis | Not started |
-| 15 | Quartu | Not started |
-| 16 | Kalebo III | Not started |
-| 17 | Veldin Orbit | Not started |
-| 18 | Veldin | Not started |
+| Level | World | English menu labels extracted | Browser-port status |
+| --- | --- | --- | --- |
+| 00 | Veldin | 1 | Partial scene/control slice only; no mission objective or actors. |
+| 01 | Novalis | 3 | Not started |
+| 02 | Aridia | 5 | Not started |
+| 03 | Kerwan | 6 | Not started |
+| 04 | Eudora | 2 | Not started |
+| 05 | Rilgar | 3 unique (4 gate records) | Not started |
+| 06 | Nebula G34 | 5 | Not started |
+| 07 | Umbris | 3 | Not started |
+| 08 | Batalia | 7 | Not started |
+| 09 | Gaspar | 1 | Not started |
+| 10 | Orxon | 5 | Not started |
+| 11 | Pokitaru | 6 | Not started |
+| 12 | Hoven | 3 | Not started |
+| 13 | Oltanis Orbit | 2 | Not started |
+| 14 | Oltanis | 4 | Not started |
+| 15 | Quartu | 4 | Not started |
+| 16 | Kalebo III | 4 | Not started |
+| 17 | Veldin Orbit | 2 | Not started |
+| 18 | Veldin | 1 | Not started |
+
+### Extracted Mission-Menu Labels
+
+The catalog of all 67 distinct USA-English labels is in the
+[browser mission catalog](browser-mission-catalog.md). These are menu/task
+labels from the original per-level tables, not verified one-to-one mission
+implementations or full objective descriptions. Rilgar's hoverboard-race label
+has two separate gate records and is listed once by display text.
+
+Extraction used the original executable's `mission_lists_by_level` table at
+`D_001A2B70` (declared and consumed by
+[`update_mission_list`](../../src/game/missions/update_mission_list.c)) and
+matched its message IDs to the USA-English `help_text` language table loaded by
+[`update_menu_help_text_load`](../../src/ui/menus/widgets/update_menu_help_text_load.c).
+On the inspected USA ISO, `disc_table.help_text` is sector 18179 for 308 sectors.
+The world labels are separately defined as 19 text-ID pairs in
+[`level_select_texts`](../../src/ui/map/level_selection/draw_level_selection_map.c).
+
+The original prerequisite evaluator is
+[`check_mission_condition`](../../src/game/missions/check_mission_condition.c):
+its condition kinds cover level/item availability, acquired items, level-object
+state, callbacks, and gold bolts. `collect_mission_ids` reads a separate
+`mission_id_collection_node_source`; that pointer is null in the extracted base
+ELF, so this static pass does **not** recover each runtime-selected objective
+chain, actor binding, or completion event. Those remain the next extraction task.
+The 16 mission-state slots in each of 20 save-level records are capacity, not
+actual mission counts.
+
+Next: automate the ELF/help-text join, then trace each menu label through the
+loaded mission-node/level-object data to prerequisites, actors, and completion
+state. Use that result to split real implementation work into one task per
+mission; keep mission labels without mapped objective logic marked as inventory
+only, not playable.
 
 ### World And Mission Task Template
 
@@ -102,8 +141,8 @@ fixture, blocked jump, clear release/jump, reset, and crouched swing selection.
 Browser checks verified `C`, Control, blur cleanup, and touch hold/release;
 direct WebGL captures showed standing and held crouch. Mobile rendering was
 nonblank with matching canvas dimensions and no overflow at 390px; direction
-and action controls did not overlap at 351px. Original source trees remain
-unchanged. Stage 3/4 gates and the provisional scope estimate are unchanged.
+and action controls did not overlap at 351px. This validates the current Veldin
+control slice only; it does not complete a mission or the full original runtime.
 
 ## Architecture
 

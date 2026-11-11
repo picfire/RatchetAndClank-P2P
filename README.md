@@ -34,11 +34,14 @@ The goal is a playable browser game followed by two-player P2P co-op.
 The current browser build is a partial Veldin scene and control slice: local
 disc loading, rendered terrain/sky/Ratchet, bounded movement and static collision,
 and selected original animation clips. It is not yet a playable mission. No other
-world or mission is implemented in the browser, and full original gameplay,
-mission progression, local co-op, and P2P networking remain unfinished.
+world or mission is implemented in the browser. English mission-menu labels have
+been extracted, but their objective chains and actors are not yet mapped or
+implemented. Audio, HUD, saves, transitions, local co-op, and P2P networking
+remain unimplemented.
 <img width="800" height="444" alt="demo" src="https://github.com/user-attachments/assets/f382f40a-116c-49e0-9ac6-daa994437731" />
 
 See the [browser progress by world and shared system](docs/build/native-browser-pipeline.md#browser-port-progress)
+and the [extracted mission-menu catalog](docs/build/browser-mission-catalog.md)
 for the verified scope and task breakdown. The progress map below measures the
 separate PS2 matching-decompilation project; its percentages do not measure
 browser gameplay progress.
