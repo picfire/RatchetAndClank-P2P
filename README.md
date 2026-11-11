@@ -1,3 +1,4 @@
+
 <p align="center">
   <img src="assets/lombyte-logo.png" alt="Lombyte" width="135">
 </p>
@@ -36,6 +37,7 @@ or a delivery forecast. Veldin terrain, textures, sky, and Ratchet render;
 keyboard/touch movement, jumping, static collision, and original idle/run/jump
 animations work in a limited slice. Full original gameplay, combat, audio, HUD,
 level transitions, local co-op, and P2P networking remain unfinished.
+<img width="800" height="444" alt="demo" src="https://github.com/user-attachments/assets/f382f40a-116c-49e0-9ac6-daa994437731" />
 
 See the [native browser pipeline](docs/build/native-browser-pipeline.md) for
 verified milestones and limitations. The upstream decompilation information below
