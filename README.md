@@ -31,17 +31,17 @@ This fork ports recovered Ratchet & Clank C to WebAssembly, with browser
 rendering and user-selected local USA disc assets, without PS2 emulation.
 The goal is a playable browser game followed by two-player P2P co-op.
 
-**Estimated completion: roughly 25% of that full goal (2026-11-04).** This is a
-provisional scope estimate, not measured code coverage, decompilation progress,
-or a delivery forecast. Veldin terrain, textures, sky, and Ratchet render;
-keyboard/touch movement, jumping, static collision, and original idle/run/jump
-animations work in a limited slice. Full original gameplay, combat, audio, HUD,
-level transitions, local co-op, and P2P networking remain unfinished.
+The current browser build is a partial Veldin scene and control slice: local
+disc loading, rendered terrain/sky/Ratchet, bounded movement and static collision,
+and selected original animation clips. It is not yet a playable mission. No other
+world or mission is implemented in the browser, and full original gameplay,
+mission progression, local co-op, and P2P networking remain unfinished.
 <img width="800" height="444" alt="demo" src="https://github.com/user-attachments/assets/f382f40a-116c-49e0-9ac6-daa994437731" />
 
-See the [native browser pipeline](docs/build/native-browser-pipeline.md) for
-verified milestones and limitations. The upstream decompilation information below
-describes the separate PS2 matching project.
+See the [browser progress by world and shared system](docs/build/native-browser-pipeline.md#browser-port-progress)
+for the verified scope and task breakdown. The progress map below measures the
+separate PS2 matching-decompilation project; its percentages do not measure
+browser gameplay progress.
 
 <h3>Decompilation progress</h3>
 

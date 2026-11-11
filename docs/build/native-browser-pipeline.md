@@ -4,17 +4,72 @@
 
 Port recovered Ratchet & Clank C to WebAssembly without PS2 emulation, using
 local user-owned USA disc assets, then add two-player P2P co-op.
-**Estimated completion: roughly 25% of the full goal (2026-11-04).** This is a
-provisional scope estimate, not measured code coverage, decompilation progress,
-or a delivery forecast; stages differ substantially in effort.
 
-Working slice: textured Veldin, sky, and Ratchet; keyboard/touch movement and
-jumping; native static collision; original idle/run/jump animation playback.
-Ground swings and an airborne slam now play from keyboard/touch input, without damage.
-Held crouch and its original crouched swing also work from keyboard/touch input.
-Remaining: full original startup and hero logic, scene objects, gameplay camera,
-combat, audio, HUD, progression, saves, transitions, local co-op, and networking.
-The full game is not yet playable; Stage 3/4 gates remain incomplete.
+There is no single completion percentage: a rendered scene, a working mission,
+and online co-op are different-sized deliverables. The browser port currently has
+one partial world slice, Veldin; no complete mission is playable. See
+[Browser Port Progress](#browser-port-progress) for the measured status. The
+Lombyte decompilation map in the README measures matching source coverage, not
+browser-port functionality.
+
+## Browser Port Progress
+
+### Shared Systems
+
+| Area | Verified now | Still needed |
+| --- | --- | --- |
+| Browser build and launch | Selected recovered C and adapters compile to WASM; local page loads user-selected ISO data. | Original game startup and a complete browser runtime. |
+| Disc/assets | Bounded local ISO reads; WAD decoding; Veldin terrain, sky, textures, Ratchet mesh, and selected animation poses are decoded. | General level/mission discovery and loading beyond the hardcoded Veldin archive. |
+| Rendering | Veldin terrain, sky, and skinned Ratchet render through Three.js. | Original render pipeline, scene objects/effects, and parity with PS2 output. |
+| Hero controls | Bounded native C adapter provides movement, jump/double-jump, crouch, and slam motion; static collision is tested. Browser JavaScript selects swing clips and coordinates animation playback. | Full original hero state machine, combat/damage, weapons, dynamic collision, and original gameplay camera. |
+| Mission flow | None verified. The current scene has no implemented mission objectives or completion loop. | Mission actors, objective state, success/failure, restart, exits, saves, and transitions. |
+| Local multiplayer | None. The native hero state is a single global context. | Two independent hero/input contexts and shared-world rules. |
+| P2P | None. | Network synchronization, signaling, authority, recovery, and multiplayer testing. |
+
+### World / Level Ledger
+
+These are level/overlay entries, not a claim that each entry equals exactly one
+mission. “Partial scene” means assets and a limited player-control slice are
+visible; it does not mean the level's mission is playable.
+
+| Level | World | Browser-port status |
+| --- | --- | --- |
+| 00 | Veldin | Partial scene/control slice: terrain, sky, Ratchet, static collision, and bounded controls. Mission objectives, level actors, full camera, and completion/transition loop are not implemented. |
+| 01 | Novalis | Not started |
+| 02 | Aridia | Not started |
+| 03 | Kerwan | Not started |
+| 04 | Eudora | Not started |
+| 05 | Rilgar | Not started |
+| 06 | Nebula G34 | Not started |
+| 07 | Umbris | Not started |
+| 08 | Batalia | Not started |
+| 09 | Gaspar | Not started |
+| 10 | Orxon | Not started |
+| 11 | Pokitaru | Not started |
+| 12 | Hoven | Not started |
+| 13 | Oltanis Orbit | Not started |
+| 14 | Oltanis | Not started |
+| 15 | Quartu | Not started |
+| 16 | Kalebo III | Not started |
+| 17 | Veldin Orbit | Not started |
+| 18 | Veldin | Not started |
+
+### World And Mission Task Template
+
+Track shared systems separately from world work. For each world/mission task,
+record the source/archive evidence and define these checks before calling it done:
+
+1. Load that level's data from the local disc with bounds and cancellation checks.
+2. Render its terrain, sky, collision, and required scene objects.
+3. Verify player movement, collision, and camera behavior in that world.
+4. Identify mission objectives from source/data, implement their state and actors,
+   and demonstrate success, failure/restart, and the level exit/transition.
+5. Add a focused regression check and record a browser run for the completed slice.
+
+Do not invent mission names or completion criteria from the overlay list alone.
+The first complete browser mission should be finished and measured in Veldin
+before marking another world playable. Do not copy upstream decompilation
+percentages into this ledger.
 
 ## Held Crouch Slice
 
@@ -42,7 +97,7 @@ RNC_ISO_PATH="$PWD/dumps/Ratchet & Clank (USA) (En,Fr,De,Es,It).iso" make browse
 make browser-game
 ```
 
-All nine focused checks passed with the local ISO, including a low-ceiling
+All ten focused checks passed with the local ISO, including a low-ceiling
 fixture, blocked jump, clear release/jump, reset, and crouched swing selection.
 Browser checks verified `C`, Control, blur cleanup, and touch hold/release;
 direct WebGL captures showed standing and held crouch. Mobile rendering was
