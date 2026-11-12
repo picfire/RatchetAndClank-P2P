@@ -6,6 +6,8 @@ import { readSkyGeometry, readSkyTextures } from './sky-geometry.mjs';
 import { loadPlanetCore, VELDIN_ARCHIVE, initializePlanetCollision } from './level-loader.mjs';
 import { readTerrainGeometry, readTerrainTextures, readMobyTextures } from './terrain-geometry.mjs';
 import { readMobyGeometry } from './moby-geometry.mjs';
+import { loadLevelGameplay, VELDIN_LEVEL } from './gameplay-loader.mjs';
+import { initializeLevelActors, tickLevelActors } from './level-actors.mjs';
 import { HeroSwingState, readHeroAnimationRig, sampleHeroAnimationFrame } from './moby-animation.mjs';
 
 const canvas = document.querySelector('canvas');
@@ -28,12 +30,14 @@ controls.rotateSpeed = 0.45;
 const skyGroup = new THREE.Group();
 const terrainGroup = new THREE.Group();
 const characterGroup = new THREE.Group();
+const actorGroup = new THREE.Group();
 skyScene.add(skyGroup);
-scene.add(terrainGroup, characterGroup);
+scene.add(terrainGroup, actorGroup, characterGroup);
 let api;
 let decoder;
 let planetDecoder;
 let collision;
+let level;
 let currentJob;
 let textures = [];
 let terrainRadius = 0;
@@ -301,8 +305,38 @@ function clearSky() {
   textures = [];
 }
 
+// Live actors: placed mobys whose transform the native moby update loop can
+// change. Ticked at the game's 60 Hz frame rate, like the hero.
+let liveActors;
+let actorTime;
+let actorRemainder = 0;
+
+function updateActors(time) {
+  if (actorTime === undefined) actorTime = time;
+  const elapsed = Math.min(Math.max((time - actorTime) / 1000, 0), 0.1);
+  actorTime = time;
+  if (!liveActors || document.hidden) { actorRemainder = 0; return; }
+  actorRemainder += elapsed;
+  let frame;
+  while (actorRemainder >= 1 / 60) {
+    frame = tickLevelActors(level, liveActors.count);
+    actorRemainder -= 1 / 60;
+  }
+  if (!frame) return;
+  for (const actor of liveActors.groups) {
+    const moby = frame.mobys[actor.userData.index];
+    actor.position.fromArray(moby.position);
+    actor.rotation.set(moby.rotation[0], moby.rotation[1], moby.rotation[2], 'ZYX');
+    actor.scale.setScalar(moby.scale / actor.userData.modelScale);
+  }
+  document.body.dataset.actorTicks = String(level.runtime_level_tick_count());
+}
+
 function clearTerrain() {
   heroActive = false;
+  liveActors = undefined;
+  actorRemainder = 0;
+  delete document.body.dataset.actorTicks;
   if (heroAnimation) {
     heroAnimation.mixer.stopAllAction();
     heroAnimation.mixer.uncacheRoot(characterGroup);
@@ -315,6 +349,14 @@ function clearTerrain() {
   delete document.body.dataset.collisionCells;
   delete document.body.dataset.collisionFaces;
   delete document.body.dataset.characterTriangles;
+  delete document.body.dataset.placedMobys;
+  delete document.body.dataset.renderedActors;
+  for (const mesh of actorGroup.children.flatMap(actor => actor.children)) {
+    mesh.geometry.dispose();
+    mesh.material.map?.dispose();
+    mesh.material.dispose();
+  }
+  actorGroup.clear();
   for (const mesh of [...terrainGroup.children, ...characterGroup.children]) {
     mesh.geometry.dispose();
     mesh.material.map?.dispose();
@@ -325,7 +367,66 @@ function clearTerrain() {
   characterGroup.rotation.set(0, 0, 0);
 }
 
-function showRatchet(planet) {
+function mobyMaterial(image) {
+  const texture = new THREE.DataTexture(image.rgba, image.width, image.height, THREE.RGBAFormat);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.needsUpdate = true;
+  return new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide, alphaTest: 0.1 });
+}
+
+// Bind-pose display of the moby table built by the original class registration
+// and init_moby_instance (level.wasm). updateActors moves them as ported class
+// updates run; classes without model data are logic-only.
+function showPlacedMobys(planet, actors) {
+  const images = readMobyTextures(planet);
+  const models = new Map();
+  const skipped = new Map();
+  let rendered = 0;
+  const groups = [];
+  for (const moby of actors.mobys) {
+    if (moby.classId === 0) continue;
+    if (!models.has(moby.classId)) {
+      try {
+        models.set(moby.classId, readMobyGeometry(planet, moby.classId));
+      } catch (error) {
+        models.set(moby.classId, null);
+        skipped.set(moby.classId, error.message);
+      }
+    }
+    const model = models.get(moby.classId);
+    // The native scale is class scale times record scale; the geometry already
+    // carries the class scale.
+    const scale = model && moby.scale / model.scale;
+    if (!model || !(scale > 0 && scale < 100)) continue;
+    const actor = new THREE.Group();
+    for (const batch of model.batches) {
+      const image = images[model.textures[batch.material]];
+      if (!image) continue;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(batch.positions, 3));
+      geometry.setAttribute('uv', new THREE.BufferAttribute(batch.uvs, 2));
+      actor.add(new THREE.Mesh(geometry, mobyMaterial(image)));
+    }
+    actor.position.fromArray(moby.position);
+    actor.rotation.set(moby.rotation[0], moby.rotation[1], moby.rotation[2], 'ZYX');
+    actor.scale.setScalar(scale);
+    actor.userData = { classId: moby.classId, uid: moby.uid, mission: moby.mission, index: moby.index, modelScale: model.scale };
+    actorGroup.add(actor);
+    groups.push(actor);
+    rendered++;
+  }
+  if (skipped.size) console.info('Placed classes without browser geometry:', Object.fromEntries(skipped));
+  document.body.dataset.placedMobys = String(actors.placed);
+  document.body.dataset.initializedMobys = String(actors.count);
+  document.body.dataset.renderedActors = String(rendered);
+  return groups;
+}
+
+function showRatchet(planet, start) {
   const model = readMobyGeometry(planet);
   heroAnimation = createHeroAnimation(readHeroAnimationRig(planet));
   const images = readMobyTextures(planet);
@@ -337,15 +438,7 @@ function showRatchet(planet) {
     geometry.setAttribute('uv', new THREE.BufferAttribute(batch.uvs, 2));
     geometry.setAttribute('skinIndex', new THREE.BufferAttribute(batch.joints, 4));
     geometry.setAttribute('skinWeight', new THREE.BufferAttribute(batch.weights, 4));
-    const texture = new THREE.DataTexture(image.rgba, image.width, image.height, THREE.RGBAFormat);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
-    texture.magFilter = THREE.LinearFilter;
-    texture.minFilter = THREE.LinearMipmapLinearFilter;
-    texture.generateMipmaps = true;
-    texture.needsUpdate = true;
-    const material = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide, alphaTest: 0.1 });
-    const mesh = new THREE.SkinnedMesh(geometry, material);
+    const mesh = new THREE.SkinnedMesh(geometry, mobyMaterial(image));
     if (characterGroup.children.length === 0) mesh.add(heroAnimation.bones[0]);
     mesh.bind(heroAnimation.skeleton, new THREE.Matrix4());
     mesh.frustumCulled = false;
@@ -356,12 +449,10 @@ function showRatchet(planet) {
     if (id !== 0 && id !== 4 && id !== 13) { action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true; }
     heroAnimation.actions.set(id, action);
   }
-  const ray = new THREE.Raycaster(new THREE.Vector3(145, 140, 100), new THREE.Vector3(0, 0, -1));
-  const ground = ray.intersectObjects(terrainGroup.children, false)[0];
-  if (!ground) throw new Error('Ratchet visual placement has no terrain surface.');
-  characterGroup.position.copy(ground.point);
-  spawn.copy(ground.point);
-  controls.target.copy(ground.point).add(new THREE.Vector3(0, 0, 0.8));
+  // Original hero start: the class-0 placed moby (load_level_gameplay.c).
+  spawn.fromArray(start.position);
+  characterGroup.position.copy(spawn);
+  controls.target.copy(spawn).add(new THREE.Vector3(0, 0, 0.8));
   terrainRadius = 1.15;
   camera.position.copy(controls.target).add(new THREE.Vector3(3, -1, 0.8));
   controls.minDistance = 1.8;
@@ -516,9 +607,19 @@ disc.addEventListener('change', async () => {
     if (currentJob !== job) return;
     showTerrain(planet);
     const world = initializePlanetCollision(planet, collision);
-    showRatchet(planet);
+    status.textContent = 'Loading Veldin gameplay...';
+    const gameplay = await loadLevelGameplay(api, reader, decoder, VELDIN_LEVEL, job.signal);
+    job.signal.throwIfAborted();
+    if (currentJob !== job) return;
+    status.textContent = 'Initializing Veldin actors...';
+    const actors = initializeLevelActors(level, planet, gameplay);
+    const groups = showPlacedMobys(planet, actors);
+    const start = actors.mobys.find(moby => moby.classId === 0);
+    if (!start) throw new Error('The moby table has no class-0 hero start.');
+    showRatchet(planet, start);
     document.body.dataset.collisionCells = String(world.cells);
     document.body.dataset.collisionFaces = String(world.faces);
+    liveActors = { count: actors.count, groups };
     document.body.dataset.state = 'rendering';
     status.textContent = 'Veldin / Ratchet';
     canvas.focus({ preventScroll: true });
@@ -533,8 +634,8 @@ disc.addEventListener('change', async () => {
 });
 
 try {
-  [api, decoder, planetDecoder, collision] = await Promise.all([
-    loadWasm('runtime'), loadWasm('wad'), loadWasm('planet-wad'), loadWasm('hero-locomotion'),
+  [api, decoder, planetDecoder, collision, level] = await Promise.all([
+    loadWasm('runtime'), loadWasm('wad'), loadWasm('planet-wad'), loadWasm('hero-locomotion'), loadWasm('level'),
   ]);
   if (api.runtime_init() !== 0) throw new Error('Native initialization failed.');
   disc.disabled = false;
@@ -544,6 +645,7 @@ try {
     api.runtime_step(Math.round(time * 1000));
     try {
       updateHero(time);
+      updateActors(time);
     } catch (error) {
       clearTerrain();
       document.body.dataset.state = 'error';

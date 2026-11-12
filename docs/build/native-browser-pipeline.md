@@ -40,7 +40,7 @@ do not assume that slot count is the number of named overlays.
 
 | Level | World | English menu labels extracted | Browser-port status |
 | --- | --- | --- | --- |
-| 00 | Veldin | 1 | Partial scene/control slice only; no mission objective or actors. |
+| 00 | Veldin | 1 | Partial scene/control slice; original hero start and 296 placed actors shown statically (no actor updates or objective yet). |
 | 01 | Novalis | 3 | Not started |
 | 02 | Aridia | 5 | Not started |
 | 03 | Kerwan | 6 | Not started |
@@ -92,6 +92,313 @@ loaded mission-node/level-object data to prerequisites, actors, and completion
 state. Use that result to split real implementation work into one task per
 mission; keep mission labels without mapped objective logic marked as inventory
 only, not playable.
+
+### Veldin: First Playable Mission Path
+
+Current evidence: `game.mjs` loads only the hardcoded Veldin archive, draws
+terrain/sky plus Ratchet's class-0 model, chooses a fixed terrain raycast for the
+spawn, and uses an orbit camera. The loaded level's moby instances and original
+update loop are not running. The Veldin core's class table contains 125 class
+definitions, including classes 834 and 1440 with class data; the recovered Level
+00 code names these as the Clank dialogue trigger and robot enemy. This confirms
+class resources exist, not that those actors are placed in the target mission.
+`initialize_level_runtime.c`'s `MobyEntry` loop registers class resources, and
+`parse_space_scene_chunk` advances render-scene data; neither is yet identified
+as the placed-actor roster. No instance has been tied to the `0x53B2`
+“Investigate crash site” label or instantiated in-browser.
+
+The shared [`run_level_main_loop`](../../src/overlays/shared/game/run_level_main_loop.c)
+calls `load_level_assets_and_gameplay(1, 0)` for a level. That loader calls
+[`load_level_gameplay`](../../src/overlays/shared/world/load_level_gameplay.c),
+whose `hdr->f44` loop parses placed-Moby records, applies mission/save filters,
+initializes instances, and stores each instance's mission index and UID. Thus
+Veldin uses this generic placement parser. The unresolved part is which loaded
+Veldin header/payload supplies `hdr->f44`, and then mapping its records to the
+`0x53B2` crash-site label and actor behavior.
+
+Work this path in order; each item should be its own task/PR:
+
+1. **Locate Veldin's gameplay payload.** Trace the `D_00173E00.f4` and
+  `D_0015EE48.file` setup through the startup archive/chunk loader. Identify the
+  exact USA-disc byte range and decoder that produce the gameplay header used
+  by `load_level_gameplay`.
+2. **Map placed Veldin actors.** Decode its `hdr->f44` table with the recovered
+  record layout. Record class ID, instance transform, mission/state fields,
+  asset dependencies, and recovered update handler. Confirm which instance, if
+  any, owns the crash-site objective; do not infer the link from a class name
+  alone.
+3. **Restore the real start context.** Replace the fixed spawn ray and orbit-only
+  camera with source-backed Veldin spawn and gameplay-camera data/behavior.
+4. **Run one mission interaction.** Wire the verified crash-site actor and
+  objective state to the smallest dependency-bounded original C/update path;
+  keep a browser adapter only for missing PS2 services.
+5. **Complete the mission loop.** Trace objective success, failure/death,
+  restart, and exit/transition from recovered code/data and implement the
+  required HUD/audio/save services instead of leaving them as silent stubs.
+6. **Verify the gate.** From a fresh local ISO load, demonstrate the objective
+  start, gameplay interaction, completion, and restart/exit; add focused tests
+  for the extracted state transitions. Only then mark Veldin's mission playable.
+
+This corrects the earlier working assumption that Veldin needed a separate
+moby-instance format.
+
+**Item 1 result (2026-11-11, static evidence; no browser code yet).** The source
+chain for Veldin's gameplay payload, verified against the local USA ISO:
+
+1. `level_archive_disc_extents` (`D_0013A448`) is `disc_table + 0x28C8`, inside
+   the `0x2960` bytes the original disc-table loader already copies from sector
+   `0x5DC` in the browser. It holds 19 `{lsn, size}` entries, one per level.
+   Veldin's entry 0 is `{1885903, 19462}`.
+2. `read_file_entry_with_retry(level)` reads 5 sectors at that LSN and copies
+   `0x2434` bytes to `D_0013A4E0` (`disc_table + 0x2960`). The level header's
+   `+0x08/+0x10/+0x18` slots therefore become `disc_table.shared_archive`,
+   `sound_archive`, and `sound_archive_alt`. Veldin's values are
+   `{1885908, 6562}`, `{1892470, 210}`, `{1892680, 210}`, then `{1892890, 7}`.
+3. [`load_level_gameplay`](../../src/overlays/shared/world/load_level_gameplay.c)
+   reads `disc_table.sound_archive`, or `sound_archive_alt` when `pal_mode` is
+   set. It then calls `fast_decompress(level_root[1], hdr)`. The `sound_archive`
+   names in `disc_table.h` are misleading: these slots are the NTSC/PAL
+   gameplay archives. The recovered header is unchanged; rename it only in a
+   separate decomp PR.
+4. The 210-sector WAD at LSN 1,892,470 decodes, using the pinned Wrench oracle,
+   to 1,113,280 bytes. All 24 header offsets are in range. `hdr->f44 = 0x7A4E0`
+   gives `n = 296`, `n2 = 256`. All 296 placed-moby records walk cleanly at a
+   uniform 120-byte size and end at exactly `0x82FB0` (`hdr->f54`).
+
+**Item 1 browser slice (2026-11-11).** The original
+[`read_file_entry_with_retry`](../../src/streaming/read_file_entry_with_retry.c)
+is now compiled unchanged into `runtime.wasm`. [disc.c](../../browser/disc.c)
+admits a second known read: 5 staged sectors at the level's extent LSN.
+WebAssembly cannot alias a symbol at an offset into another symbol, so
+`D_0013A448` is a mirror of `disc_table + 0x28C8`, filled after the original
+table copy. `D_0013A4E0` is separate guarded storage holding only the `0x2434`
+copied bytes. Its other uses (pad state at `+0x2460`/`+0x2600`) are not owned
+by this module. [gameplay-loader.mjs](../../browser/gameplay-loader.mjs)
+decodes slot 2 with the native `wad.c` and reads the placed-moby records using
+the `load_level_gameplay` field layout. It does not run the original mission or
+save filters. The game page now places Ratchet at the original class-0 start,
+`(132.1, 115.5, 31.4)`, instead of a fixed raycast. It also draws the level's
+placed actors as static bind-pose meshes. `moby-geometry.mjs` now accepts rigid
+(zero-joint) classes, so crates decode at exactly 1×1×1 units.
+
+Validation: `RNC_ISO_PATH=... make browser-gameplay-test` gives 4/4 passing.
+The real-disc check covers: Veldin header LSN 1885903, gameplay `{1892470, 210}`
+and PAL `{1892680, 210}`, 1,113,280 decoded bytes, and 296 records ending at
+`hdr->f54`. It also covers the hero start and the single class-834 Clank trigger
+at about `(171, 271, 29)`. All browser suites pass (53, with 2 optional oracle
+skips), as do the 10 collision checks and lint. A Node run of the native hero
+module at the original start stayed grounded on real Veldin collision and
+moved under input. **Not yet verified in a real browser.** No automation tool
+is installed; reload the page with the ISO to confirm actor placement visually.
+
+**Item 2 roster (decoded, Veldin NTSC).** Missions present: `-1` (235 records)
+and `0` (61 records). Every listed update handler has recovered C, with no
+`INCLUDE_ASM` stubs:
+
+| Class | Count | Update handler | Role on the mission path |
+| --- | --- | --- | --- |
+| 0 | 1 | — | Hero start, next to the ship |
+| 530 | 1 | `veldin_ship_update` | Ratchet's ship at the start |
+| 834 | 1 | `clank_cutscene_trigger_update` | Crash-site objective (see below) |
+| 809 / 760 | 1 / 6 | smoke/fire controller / spawner | Crash-site smoke, logic-only |
+| 1413 | 1 | `help_hints_update` | Veldin help messages, logic-only |
+| 1471 / 1545 | 1 / 1 | beam slot / phase-effect controllers | Logic-only |
+| 1440 | 9 | `veldin_robot_enemy_update` | Robot enemies |
+| 749 / 1564 | 16 / 25 | `horny_toad_update` / `pterodactyl_update` | Wildlife enemies |
+| 500 / 501 / 511 | 103 / 2 / 6 | `crate_update` | Crates (mission-0 records gated by flags) |
+| 13 / 1060 | 29 / 21 | `bolt_update` / `red_orb_update` | Pickups |
+| 1781 / 1782 | 33 / 36 | `red_plant_update` | Scenery plants |
+| 1137 / 1520 / 1964 | 1 each | not in the L00 class table | Unresolved; geometry has untextured primitives |
+
+Mission objective evidence:
+[`clank_cutscene_trigger_update`](../../src/overlays/l00/mobys/clank_cutscene_trigger.c)
+runs `initialize_npc_dialogue` / `update_npc_dialogue`. Once dialogue progress
+`vars->unk24 >= 4`, it calls `request_space_load(1)`, the Veldin exit. So
+"Investigate crash site" means reaching the class-834 actor, completing its
+dialogue, and leaving the level. The `0x53B2` label link is still inferred from
+this flow, not from a data reference.
+
+Next tasks, in order:
+
+1. **Placed-moby runtime (original C).** Compile the record loop of
+   `load_level_gameplay` (or a dependency-bounded extraction of it),
+   `init_moby_instance`, and the mission/save filters into a native module. It
+   must produce the real `moby_table`, rather than the JS static display.
+2. **Moby update tick.** Call the recovered per-class update from the L00 class
+   table each frame. Start with logic-only and cheap classes (`help_hints`,
+   `smoke_fire_controller`, `crate_update` without breakage), then
+   `clank_cutscene_trigger`.
+3. **Clank trigger and dialogue.** Port `is_point_inside_clip_volume`,
+   `initialize_npc_dialogue`/`update_npc_dialogue`, and the dialogue text
+   needed for the HUD. Treat `request_space_load(1)` as the mission-complete
+   signal and show a browser transition stub that is labeled as such.
+4. **Moby collision**, so the ship, crates, and props block the hero.
+5. Then enemies (robot, toad), wrench combat, bolts/HUD counter, and death and
+   restart, per the item 5/6 gate above.
+
+**Task 1 result: placed-moby runtime (2026-11-11, Node only).**
+[level.c](../../browser/level.c) builds `level.wasm`. It runs the original
+class registration and moby initialization over the real Veldin header, core,
+and gameplay buffers, staged by [level-actors.mjs](../../browser/level-actors.mjs).
+These recovered files are compiled unchanged:
+
+- `register_moby_class`, `assign_moby_class_data`,
+  `prepare_resident_class_render_data`, `build_indexed_resident_render_packet`,
+  `set_up_vis_gif_viewer`, `update_moby_animation_state`,
+  `pack_render_command_fields`, and `store_current_level_table_value`.
+- The L00 `level_class_tables.c`.
+- `init_moby_instance`, compiled through
+  [level-moby-instance.c](../../browser/level-moby-instance.c), which widens its
+  `unsigned long` field at `0x38` to the EE's 64 bits for wasm32 only.
+
+The whole `load_level_gameplay` is not compiled. It leaves 247 undefined
+symbols, including VU0 microcode, scratchpad lighting, ties, sound, and text.
+Instead, `runtime_level_spawn_mobys` mirrors its `hdr->f44` loop
+(`load_level_gameplay.c:932-1103`): the exclusion, mission, and save-bit filters
+and the field stores. It calls the original per-record functions.
+
+Adapter boundary:
+
+- **Class table.** The L00 overlay's own `moby_classes` table
+  (`D_L00_001EA300`, 101 entries) is copied into `D_001E8B80` before
+  registration. This is the table the overlay's copy of
+  `assign_moby_class_data` reads.
+- **Update handlers.** The 91 functions that table references are hard stops
+  in [level-unported.c](../../browser/level-unported.c). Calling one traps and
+  records its name. Ten have no recovered C. No update tick runs yet.
+- **Unrecovered calls.** `update_entity` (FUN_L00_00250df8, VU0 macro code)
+  has no recovered C and is only counted: 286 calls are pending for Veldin.
+  `probe_ground_height` and `find_or_assign_bolt_source_slot` trap with a
+  name. No Veldin record needs either one.
+- **New-game state, assumed and not traced.** The mission row, the
+  exclusion table, and the save bits are all zero. The level's classes start
+  at slot 0 because no resident classes are registered. `gs_texture_allocation_base`
+  is 0, and the material templates are zero, so the GS packet words are not
+  validated. `resident_object_pool` is the moby table base, so the
+  `unkA8`/`unkAC` pool slots equal the moby index; their retail values are
+  unverified.
+- **Bounded helpers.** `fill_transfer_words` writes only to level storage or
+  the class-slot table and traps on anything else. Guard bytes follow every
+  buffer and are checked after each class registration.
+
+**wasm/LTO hazards found here.** Two were found while running the code:
+
+1. **Signature mismatches fail silently.** Under LTO, a call through a
+   declaration whose IR type differs from the definition becomes
+   `unreachable`, and wasm-ld doesn't warn when both types lower to i32.
+   Examples were `log2dim` returning `s16` versus the caller's `s32`, and
+   `fill_transfer_words` returning `s32` versus `void`. The adapter's
+   definitions now copy the recovered callers' prototypes, and the link uses
+   `-Wl,--fatal-warnings`. A known remaining mismatch is between two recovered
+   files: `register_moby_class` declares `prepare_resident_class_render_data`
+   with `s32` arguments where its definition takes pointers. It runs
+   correctly, but leave it alone in `src/` without a matching build.
+2. **Negative indexes off a constant base.** wasm adds load offsets without
+   32-bit wrap. `(row + 1)[-1]` on a static array became an access past 4 GiB,
+   so the adapter indexes mission states as `row[mission + 1]`.
+
+Validation: `RNC_ISO_PATH=... make browser-gameplay-test` passes 7 of 7.
+
+- The synthetic tests cover out-of-order calls, oversized buffers, bad class
+  tables, duplicate ids, class data outside the core, and the logic-only class
+  834 getting its L00 update handler.
+- The real-disc test registers 125 classes and initializes all 296 placed
+  records, with 0 filtered on the new-game state. Every instance keeps its
+  record's class, uid, and position. Its class slot maps back to the same
+  class id. Class 834 appears once, with an update handler, and the hero start
+  is at `(132.1, 115.5, 31.4)`. One table value is stored, and the guards are
+  intact.
+- 292 of the 296 instances got an update handler. The 4 without are class 0
+  and the three classes missing from the L00 table.
+- The runtime (15), assets (11), WAD (13), and collision (10) suites pass, and
+  ESLint passes.
+- `npm run lint`'s codespell step did not run, because `codespell` is not
+  installed.
+
+`game.mjs` now loads `level.wasm` and draws placed actors from this native
+moby table (instance scale divided by the class scale the geometry already
+carries).
+
+**Task 2 result: first class update tick, pterodactyls (2026-11-11).**
+The original `pterodactyl_update` (class 1564, 25 Veldin instances) runs every
+frame and flies each pterodactyl along its path through the original
+`sample_camera_path`. Both are compiled unchanged through wrappers:
+
+- [level-camera-path.c](../../browser/level-camera-path.c) renames the file's
+  local `func_` prototypes, which conflict with `asm_helpers.h`.
+- [level-pterodactyl.c](../../browser/level-pterodactyl.c) reorders the
+  `sample_camera_path` call. The recovered caller declares the float second,
+  and the definition declares it last. The EE passes floats in `$f12`
+  regardless of position, so both describe the same call. Wasm arguments are
+  positional, and under LTO the mismatched call would become a trap.
+  **Hazard 3: check float-argument order between prototypes.**
+- `random_integer_below.c` and `absolute_float.c` are compiled unchanged.
+
+[level-math.c](../../browser/level-math.c) holds C versions of assembly-only
+helpers. Each one was decoded from the EE/VU0 instructions at its address:
+`fast_add_rotations`, `fast_subtract_rotations`, `truncate_float_to_s32`
+(saturating, because wasm truncation traps), `fast_vec_sub`, `lerp_vector`,
+`vector_length_xy`, `fast_vec_dist`, `fast_arc_tan`, and newlib `rand`.
+`fast_arc_tan` is atan2 computed as π/4 + an odd degree-15 polynomial in
+`(a−b)/(a+b)`, with an octant table at `0x1de340` selected by sign bits. The
+results are IEEE. The EE flushes denormals and rounds toward zero, so the last
+bit can differ.
+
+New passes in `runtime_level_attach_pvars_and_paths`:
+
+- **Pvars** (`load_level_gameplay.c:1107-1158`, moby part). Each placed moby's
+  pvar block is copied into a level heap, and `moby->pvars` points at it.
+  Indices must be unique and in range: Veldin has 222 users and no
+  duplicates. The camera and sound-instance blocks that the original copies
+  first are not loaded, so moby blocks sit at different heap addresses with
+  the same bytes.
+- **`hdr->f5C` self-relative pointers.** These are mirrored: 338 are
+  relocated, including offset 0 of every pterodactyl block.
+- **`hdr->f50` (moby index remap) and `hdr->f4C` (shared data).** These are
+  not mirrored yet. 25 entries target copied blocks, and a moby whose block
+  has a pending fixup is never updated.
+- **Paths** (`load_level_gameplay.c:1279-1298`). The path block is copied and
+  `toad_paths` (`D_L00_001B04B0`) is filled. Veldin has 42 paths, and each one
+  is bounds-checked against its point count. The table size isn't in
+  data.tsv, so 256 slots is an assumption.
+
+`runtime_level_tick` is one frame of `update_visible_mobys`:
+
+- Its visibility list comes from `build_resident_visibility_list`, which is
+  assembly only. The tick links every live moby the way
+  `link_and_update_all_mobys` does instead (state without 0x80, flags
+  without 2).
+- Only ported class updates are called. Today that is just the pterodactyl;
+  every other update is counted as unported.
+- `advance_moby_animation` and `refresh_moby_spatial_bounds` are counted, not
+  run.
+- `game.mjs` ticks at a fixed 60 Hz and copies native positions, rotations,
+  and scales to the actor meshes.
+
+Assumptions: `frame_time` is 1/60, the boot image value, and nothing on this
+path writes it. The `rand` seed is 1, and no `srand` call has been traced.
+`mark_moby_for_removal` and `blend_moby_animation` are named hard stops.
+Neither is reached on Veldin: no pterodactyl has path −1, and `anim_flags`
+bit 2 stays 0 without the animation advance.
+
+Validation:
+
+- `RNC_ISO_PATH=... node --test browser/*.test.mjs`: 57 pass, 2 skipped.
+  `make browser-gameplay-test`: 8 of 8.
+- The new real-disc test checks that every pvar user gets a distinct copied
+  block and that 42 paths load. After frame 1, each pterodactyl is in state 1
+  with doubled scale. Its position equals the path lerp at `start × count`
+  plus its height offset, within 1e-3. Its progress increment is
+  `6·(1/60)/first segment length`. At path points, its heading and pitch
+  match `Math.atan2` within 1e-5. After 600 more frames, each one has moved
+  and stays within one segment length of its path, and the guards are intact.
+- Headless Chrome against the served `build/browser` page reaches
+  `rendering`, ticks at about 60 Hz with no exceptions, and a pterodactyl
+  visibly crosses the sky between screenshots.
+
+Not yet verified: the console's actual visibility culling (`update_dist`),
+animation playback (wings do not flap; advance_moby_animation is the next
+port), and the retail heap addresses.
 
 ### World And Mission Task Template
 

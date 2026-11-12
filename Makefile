@@ -10,7 +10,7 @@
 
 .DEFAULT_GOAL := check
 .PHONY: elf iso clean-iso check progress overlays format lint browser-smoke browser-assets browser-assets-test
-.PHONY: browser-runtime browser-runtime-test
+.PHONY: browser-runtime browser-runtime-test browser-gameplay-test browser-level browser-planet-wad
 .PHONY: browser-wad browser-wad-test browser-game browser-hero browser-collision browser-collision-test
 
 EMCC ?= emcc
@@ -85,24 +85,56 @@ browser-runtime: browser-wad ## Build native state, original disc loader, and bo
 	  -c src/game/clear_scene_state_buffers.c -o build/browser/scene-reset.o
 	$(EMCC) -O2 -Wall -Wextra -Werror -Wno-incompatible-pointer-types -Wno-unknown-attributes -Iinclude \
 	  -c src/streaming/load_disc_sectors_into_global_buffer.c -o build/browser/disc-loader.o
+	$(EMCC) -O2 -Wall -Wextra -Werror -Wno-incompatible-pointer-types -Wno-unknown-attributes -Iinclude \
+	  -c src/streaming/read_file_entry_with_retry.c -o build/browser/level-header-reader.o
 	$(EMCC) -O2 -Wall -Wextra -Werror -Iinclude \
-	  build/browser/scene-reset.o build/browser/disc-loader.o browser/count_vsync.c browser/runtime.c browser/disc.c \
+	  build/browser/scene-reset.o build/browser/disc-loader.o build/browser/level-header-reader.o browser/count_vsync.c browser/runtime.c browser/disc.c \
 	  src/world/loaders/relocate_sky_definition.c browser/sky.c \
 	  --no-entry -sSTANDALONE_WASM=1 -sFILESYSTEM=0 -sERROR_ON_UNDEFINED_SYMBOLS=1 \
-	  -sEXPORTED_FUNCTIONS='["_runtime_init","_runtime_reset_scene","_runtime_guards_valid","_runtime_buffer_address","_runtime_buffer_size","_runtime_fill","_runtime_step","_runtime_frame_count","_runtime_time","_runtime_disc_reset","_runtime_disc_guards_valid","_runtime_disc_stage_address","_runtime_disc_stage_size","_runtime_disc_table_address","_runtime_disc_table_size","_runtime_disc_load","_runtime_disc_ready","_runtime_disc_entry_sector","_runtime_disc_entry_count","_runtime_disc_service_calls","_runtime_sky_reset","_runtime_sky_guards_valid","_runtime_sky_stage_address","_runtime_sky_capacity","_runtime_sky_ready","_runtime_sky_load"]' \
+	  -sEXPORTED_FUNCTIONS='["_runtime_init","_runtime_reset_scene","_runtime_guards_valid","_runtime_buffer_address","_runtime_buffer_size","_runtime_fill","_runtime_step","_runtime_frame_count","_runtime_time","_runtime_disc_reset","_runtime_disc_guards_valid","_runtime_disc_stage_address","_runtime_disc_stage_size","_runtime_disc_table_address","_runtime_disc_table_size","_runtime_disc_load","_runtime_disc_ready","_runtime_disc_entry_sector","_runtime_disc_entry_count","_runtime_disc_service_calls","_runtime_disc_level_header_sector","_runtime_disc_level_header_load","_runtime_disc_level_header_ready","_runtime_disc_level_slot_sector","_runtime_disc_level_slot_count","_runtime_sky_reset","_runtime_sky_guards_valid","_runtime_sky_stage_address","_runtime_sky_capacity","_runtime_sky_ready","_runtime_sky_load"]' \
 	  -o build/browser/runtime.wasm
 	cp browser/runtime.html build/browser/runtime.html
 	cp browser/iso-reader.mjs browser/disc-loader.mjs build/browser/
 
-browser-game: browser-runtime browser-hero ## Build the native game viewport with local Three.js
-	@test -f build/browser/node_modules/three/build/three.module.js || npm install --prefix build/browser --no-save --ignore-scripts --package-lock=false three@0.180.0
+browser-planet-wad: ## Build the WAD decoder sized for whole planet cores
+	mkdir -p build/browser
 	$(EMCC) -O2 -Wall -Wextra -Werror -DINPUT_LIMIT=16777216 -DOUTPUT_LIMIT=33554432 browser/wad.c \
 	  --no-entry -sSTANDALONE_WASM=1 -sFILESYSTEM=0 -sERROR_ON_UNDEFINED_SYMBOLS=1 \
 	  -sINITIAL_MEMORY=67108864 \
 	  -sEXPORTED_FUNCTIONS='["_wad_reset","_wad_guards_valid","_wad_input_address","_wad_input_capacity","_wad_output_address","_wad_output_capacity","_wad_output_size","_wad_ready","_wad_decode"]' \
 	  -o build/browser/planet-wad.wasm
-	cp browser/game.html browser/game.mjs browser/sky-geometry.mjs browser/level-loader.mjs browser/terrain-geometry.mjs browser/moby-geometry.mjs browser/moby-animation.mjs build/browser/
+browser-game: browser-runtime browser-hero browser-level browser-planet-wad ## Build the native game viewport with local Three.js
+	@test -f build/browser/node_modules/three/build/three.module.js || npm install --prefix build/browser --no-save --ignore-scripts --package-lock=false three@0.180.0
+	cp browser/game.html browser/game.mjs browser/gameplay-loader.mjs browser/level-actors.mjs browser/sky-geometry.mjs browser/level-loader.mjs browser/terrain-geometry.mjs browser/moby-geometry.mjs browser/moby-animation.mjs build/browser/
 	cp browser/game.html build/browser/index.html
+
+browser-gameplay-test: browser-runtime browser-level browser-planet-wad ## Test level header/gameplay loading and actor setup; set RNC_ISO_PATH for Veldin
+	$(NODE) --test browser/gameplay-loader.test.mjs browser/level.test.mjs
+
+BROWSER_LEVEL_SOURCES := src/world/loaders/register_moby_class.c src/mobys/assign_moby_class_data.c \
+  src/rendering/mobys/prepare_resident_class_render_data.c src/rendering/packets/build_indexed_resident_render_packet.c \
+  src/rendering/packets/set_up_vis_gif_viewer.c src/mobys/animation/update_moby_animation_state.c \
+  src/rendering/packets/pack_render_command_fields.c src/overlays/shared/ui/menus/ensure_menu_cache_entry.c \
+  src/overlays/l00/level_class_tables.c src/math/random/random_integer_below.c src/math/absolute_float.c
+
+browser-level: ## Build native level actor setup: original class registration and placed-moby initialization
+	mkdir -p build/browser/level
+	@set -e; for source in $(BROWSER_LEVEL_SOURCES); do \
+	  $(EMCC) $(BROWSER_HERO_CFLAGS) -c $$source -o build/browser/level/$$(basename $$source .c).o; done
+	@# init_moby_instance declares its 64-bit field as `unsigned long` (64-bit on the EE, 32-bit on
+	@# wasm32); browser/level-moby-instance.c compiles it with the EE width instead of editing src/.
+	$(EMCC) $(BROWSER_HERO_CFLAGS) -c browser/level-moby-instance.c -o build/browser/level/init_moby_instance.o
+	@# sample_camera_path and the pterodactyl update compile unchanged through wrappers that resolve
+	@# prototype conflicts (see the comments in each wrapper).
+	$(EMCC) $(BROWSER_HERO_CFLAGS) -c browser/level-camera-path.c -o build/browser/level/sample_camera_path.o
+	$(EMCC) $(BROWSER_HERO_CFLAGS) -c browser/level-pterodactyl.c -o build/browser/level/pterodactyl.o
+	$(EMCC) -O2 -flto -Wall -Wextra -Werror -Ibrowser/include -Iinclude browser/level.c browser/level-unported.c browser/level-math.c \
+	  -Wl,--fatal-warnings \
+	  build/browser/level/*.o \
+	  --no-entry -sSTANDALONE_WASM=1 -sFILESYSTEM=0 -sERROR_ON_UNDEFINED_SYMBOLS=1 \
+	  -sINITIAL_MEMORY=33554432 \
+	  -sEXPORTED_FUNCTIONS='["_runtime_level_reset","_runtime_level_guards_valid","_runtime_level_header_address","_runtime_level_header_capacity","_runtime_level_core_address","_runtime_level_core_capacity","_runtime_level_gameplay_address","_runtime_level_gameplay_capacity","_runtime_level_register_classes","_runtime_level_spawn_mobys","_runtime_level_class_count","_runtime_level_class_slot","_runtime_level_class_id","_runtime_level_class_has_update","_runtime_level_class_has_data","_runtime_level_moby_count","_runtime_level_placed_count","_runtime_level_skipped_count","_runtime_level_extra_slots","_runtime_level_pending_entity_updates","_runtime_level_table_value_stores","_runtime_level_moby_address","_runtime_level_moby_stride","_runtime_level_unported_name","_runtime_level_attach_pvars_and_paths","_runtime_level_tick","_runtime_level_pvar_users","_runtime_level_pvar_bytes","_runtime_level_pending_pvar_fixups","_runtime_level_relocated_pvar_pointers","_runtime_level_path_count","_runtime_level_path_address","_runtime_level_moby_fixup_pending","_runtime_level_tick_count","_runtime_level_ticked_updates","_runtime_level_unported_update_calls","_runtime_level_pending_animation_advances","_runtime_level_pending_bounds_refreshes"]' \
+	  -o build/browser/level.wasm
 
 browser-runtime-test: browser-runtime ## Execute the original scene and frame-counter checks
 	$(NODE) --test browser/runtime.test.mjs

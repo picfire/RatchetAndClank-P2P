@@ -10,11 +10,33 @@ enum {
     DISC_TABLE_SECTORS = 6,
     DISC_STAGE_BYTES = DISC_SECTOR_BYTES * DISC_TABLE_SECTORS,
     DISC_COPY_BYTES = 0x2960,
-    DISC_GUARD_BYTES = 16
+    DISC_GUARD_BYTES = 16,
+    LEVEL_EXTENT_OFFSET = 0x28C8,
+    LEVEL_COUNT = 19,
+    LEVEL_HEADER_SECTORS = 5,
+    LEVEL_HEADER_COPY_BYTES = 0x2434,
+    LEVEL_HEADER_SLOTS = 5
+};
+
+struct LevelExtent {
+    u32 lsn;
+    u32 size;
 };
 
 u8 disc_table_storage[DISC_STAGE_BYTES + DISC_GUARD_BYTES] __asm__("D_00137B80") __attribute__((aligned(16)));
 u8 D_0015ED58 = 0;
+
+/* On the PS2, D_0013A448 is disc_table + 0x28C8 and D_0013A4E0 directly follows
+   the copied table. WebAssembly data symbols cannot alias an offset into another
+   symbol, so the adapter owns them separately: the extent slice is mirrored from
+   the table the original loader filled, and the level header buffer gets its
+   own guarded storage. Only the 0x2434 bytes the original reader copies exist. */
+struct LevelExtent level_archive_disc_extents[LEVEL_COUNT] __asm__("D_0013A448");
+u8 level_header_storage[LEVEL_HEADER_COPY_BYTES + DISC_GUARD_BYTES] __asm__("D_0013A4E0")
+    __attribute__((aligned(16)));
+
+_Static_assert(LEVEL_EXTENT_OFFSET + sizeof(level_archive_disc_extents) == DISC_COPY_BYTES,
+               "Level extents end where the copied disc table ends.");
 
 static u8 staged_sectors[DISC_STAGE_BYTES + DISC_GUARD_BYTES] __attribute__((aligned(16)));
 static u32 volume_sectors;
@@ -24,6 +46,11 @@ static u32 error_checks;
 static s32 load_active;
 static s32 read_state;
 static s32 table_ready;
+static u32 expected_sector;
+static u32 expected_count;
+static s32 header_level;
+
+extern s32 read_file_entry_with_retry(s32 file) __asm__("FUN_0012f368");
 
 extern s32 load_disc_sectors_into_global_buffer(void) __asm__("FUN_0012f2b8");
 
@@ -33,7 +60,8 @@ s32 runtime_disc_guards_valid(void) {
     u32 index;
     for (index = 0; index < DISC_GUARD_BYTES; index++) {
         if (staged_sectors[DISC_STAGE_BYTES + index] != 0xA5 ||
-            disc_table_storage[DISC_STAGE_BYTES + index] != 0xA5) {
+            disc_table_storage[DISC_STAGE_BYTES + index] != 0xA5 ||
+            level_header_storage[LEVEL_HEADER_COPY_BYTES + index] != 0xA5) {
             return 0;
         }
     }
@@ -46,6 +74,16 @@ void runtime_disc_reset(void) {
         staged_sectors[index] = index < DISC_STAGE_BYTES ? 0 : 0xA5;
         disc_table_storage[index] = index < DISC_STAGE_BYTES ? 0 : 0xA5;
     }
+    for (index = 0; index < LEVEL_HEADER_COPY_BYTES + DISC_GUARD_BYTES; index++) {
+        level_header_storage[index] = index < LEVEL_HEADER_COPY_BYTES ? 0 : 0xA5;
+    }
+    for (index = 0; index < LEVEL_COUNT; index++) {
+        level_archive_disc_extents[index].lsn = 0;
+        level_archive_disc_extents[index].size = 0;
+    }
+    expected_sector = 0;
+    expected_count = 0;
+    header_level = -1;
     volume_sectors = 0;
     read_calls = 0;
     sync_calls = 0;
@@ -78,12 +116,12 @@ s32 sceCdRead(u32 sector, u32 count, void *destination, struct sceCdRMode *mode)
     u32 index;
 
     if (!load_active || read_state != 0 || !runtime_disc_guards_valid() ||
-        sector != DISC_TABLE_SECTOR || count != DISC_TABLE_SECTORS ||
-        address > memory_bytes || DISC_STAGE_BYTES > memory_bytes - address ||
+        sector != expected_sector || count != expected_count ||
+        address > memory_bytes || count * DISC_SECTOR_BYTES > memory_bytes - address ||
         bytes[0] != 0x20 || bytes[1] != D_0015ED58 || bytes[2] != 0 || bytes[3] != 0) {
         __builtin_trap();
     }
-    for (index = 0; index < DISC_STAGE_BYTES; index++) {
+    for (index = 0; index < count * DISC_SECTOR_BYTES; index++) {
         ((u8 *)destination)[index] = staged_sectors[index];
     }
     read_calls++;
@@ -116,7 +154,9 @@ s32 sceGsSyncV(s32 mode) {
 
 s32 runtime_disc_load(u32 bytes, u32 sectors) {
     s32 result;
+    u32 index;
     table_ready = 0;
+    header_level = -1;
     if (load_active || bytes != DISC_STAGE_BYTES ||
         sectors < DISC_TABLE_SECTOR + DISC_TABLE_SECTORS || !runtime_disc_guards_valid()) {
         return -1;
@@ -126,11 +166,16 @@ s32 runtime_disc_load(u32 bytes, u32 sectors) {
     sync_calls = 0;
     error_checks = 0;
     read_state = 0;
+    expected_sector = DISC_TABLE_SECTOR;
+    expected_count = DISC_TABLE_SECTORS;
     load_active = 1;
     result = load_disc_sectors_into_global_buffer();
     load_active = 0;
     if (result != 1 || read_state != 3 || !runtime_disc_guards_valid()) {
         return -1;
+    }
+    for (index = 0; index < LEVEL_COUNT * sizeof(struct LevelExtent); index++) {
+        ((u8 *)level_archive_disc_extents)[index] = disc_table_storage[LEVEL_EXTENT_OFFSET + index];
     }
     table_ready = 1;
     return 1;
@@ -164,4 +209,60 @@ u32 runtime_disc_service_calls(u32 service) {
     if (service == 1) return sync_calls;
     if (service == 2) return error_checks;
     return 0;
+}
+static s32 sector_range_valid(u32 sector, u32 count) {
+    return count > 0 && sector <= volume_sectors && count <= volume_sectors - sector;
+}
+
+/* First sector of a level's 5-sector header, from the extent table the
+   original disc-table loader filled. */
+s32 runtime_disc_level_header_sector(u32 level) {
+    u32 sector;
+    if (!runtime_disc_ready() || level >= LEVEL_COUNT) return -1;
+    sector = level_archive_disc_extents[level].lsn;
+    return sector_range_valid(sector, LEVEL_HEADER_SECTORS) ? (s32)sector : -1;
+}
+
+/* Runs the unchanged original read_file_entry_with_retry against 5 staged
+   sectors, which must be the sectors at runtime_disc_level_header_sector. */
+s32 runtime_disc_level_header_load(u32 level, u32 bytes) {
+    s32 result;
+    s32 sector = runtime_disc_level_header_sector(level);
+    header_level = -1;
+    if (load_active || sector < 0 || bytes != LEVEL_HEADER_SECTORS * DISC_SECTOR_BYTES ||
+        !runtime_disc_guards_valid()) {
+        return -1;
+    }
+    read_state = 0;
+    expected_sector = (u32)sector;
+    expected_count = LEVEL_HEADER_SECTORS;
+    load_active = 1;
+    result = read_file_entry_with_retry((s32)level);
+    load_active = 0;
+    if (result != 1 || read_state != 3 || !runtime_disc_guards_valid()) return -1;
+    header_level = (s32)level;
+    return 1;
+}
+
+s32 runtime_disc_level_header_ready(void) {
+    return header_level;
+}
+
+/* Header slots copied to D_0013A4E0. Slot 2 is disc_table.sound_archive at
+   0x2970, which load_level_gameplay reads as the NTSC gameplay archive. */
+static const u32 *level_slot(u32 slot) {
+    const u32 *entry;
+    if (header_level < 0 || slot == 0 || slot >= LEVEL_HEADER_SLOTS) return 0;
+    entry = (const u32 *)(level_header_storage + slot * 8);
+    return sector_range_valid(entry[0], entry[1]) ? entry : 0;
+}
+
+s32 runtime_disc_level_slot_sector(u32 slot) {
+    const u32 *entry = level_slot(slot);
+    return entry ? (s32)entry[0] : -1;
+}
+
+s32 runtime_disc_level_slot_count(u32 slot) {
+    const u32 *entry = level_slot(slot);
+    return entry ? (s32)entry[1] : -1;
 }

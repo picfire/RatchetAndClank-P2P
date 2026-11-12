@@ -38,6 +38,8 @@ export function readMobyGeometry(planet, classId = 0) {
   range(model.packets, model.highLodCount * 16);
   const cache = new Map(), skinCache = new Map(), matrixPalette = new Map(), batches = new Map();
   function jointSkin(joint) {
+    // Rigid classes (crates, orbs) have no skeleton; every vertex is model-space.
+    if (model.jointCount === 0) return { joints: [0, 0, 0, 0], weights: [1, 0, 0, 0] };
     if (joint >= model.jointCount) throw new Error('Moby skin joint is outside its skeleton.');
     return { joints: [joint, 0, 0, 0], weights: [1, 0, 0, 0] };
   }
@@ -173,7 +175,8 @@ export function readMobyGeometry(planet, classId = 0) {
       }
     }
   }
-  return { triangles, packets: model.highLodCount, textures: model.textures,
+  // scale: the class scale (class + 0x24) already applied to the positions.
+  return { triangles, packets: model.highLodCount, textures: model.textures, scale: model.scale,
     batches: [...batches.values()].map(batch => ({ ...batch,
       positions: new Float32Array(batch.positions), uvs: new Float32Array(batch.uvs),
       joints: new Uint16Array(batch.joints), weights: new Float32Array(batch.weights) })) };

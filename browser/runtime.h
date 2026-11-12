@@ -26,6 +26,11 @@ s32 runtime_disc_ready(void);
 s32 runtime_disc_entry_sector(u32 offset);
 s32 runtime_disc_entry_count(u32 offset);
 u32 runtime_disc_service_calls(u32 service);
+s32 runtime_disc_level_header_sector(u32 level);
+s32 runtime_disc_level_header_load(u32 level, u32 bytes);
+s32 runtime_disc_level_header_ready(void);
+s32 runtime_disc_level_slot_sector(u32 slot);
+s32 runtime_disc_level_slot_count(u32 slot);
 
 void runtime_sky_reset(void);
 s32 runtime_sky_guards_valid(void);
