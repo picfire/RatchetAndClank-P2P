@@ -1,0 +1,5 @@
+[codespell]
+# Terms of the PS2 hardware and this codebase that are not misspellings:
+# lod = texture level of detail (GS TEX1 register), statics = static data,
+# fo = a field name in the spike's report output.
+ignore-words-list = lod,statics,fo

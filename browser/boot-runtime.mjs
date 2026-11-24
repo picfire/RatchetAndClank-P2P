@@ -143,7 +143,7 @@ export class BootRuntime {
       case 'spike_dma_chain': return (channel, chain) => this.gsDmaChain(channel >>> 0, chain >>> 0);
       case 'spike_play_movie': return (sector, bytes, channel) => this.suspend('movie', () => this.playMovie(sector, bytes, channel));
       case 'spike_debug_print': return (at) => this.log(`game: ${this.cString(at).replace(/\n$/, '')}`);
-      case 'spike_deferred': return (nameAt, reasonAt) => { const key = this.cString(nameAt); this.deferred.set(key, (this.deferred.get(key) ?? 0) + 1); };
+      case 'spike_deferred': return (nameAt) => { const key = this.cString(nameAt); this.deferred.set(key, (this.deferred.get(key) ?? 0) + 1); };
       case 'spike_unimplemented_rpc': return (server, fn) => { throw new Error(`IOP RPC server 0x${(server >>> 0).toString(16)} is not implemented (function ${fn})`); };
       case 'spike_world_pass': return () => {
         // services.c tfrag_proc: the level's world, drawn by the browser renderer into this frame.

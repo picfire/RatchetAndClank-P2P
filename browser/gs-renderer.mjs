@@ -481,7 +481,7 @@ export class GsRenderer {
         frame: [s.fbp, s.fbw, s.fpsm], fbmsk: (s.fbmsk >>> 0).toString(16), zte: s.zte, ztst: s.ztst, zbp: s.zbp, blend: [s.asel, s.bsel, s.csel, s.dsel, s.fix], tfx: s.texture?.tfx, tcc: s.texture?.tcc, fba: s.fba, pabe: s.pabe });
       if (this.trace.length > 400) this.trace.shift();
     }
-    if (this.trace && s.texture && this.captureTbp === s.texture.tbp && s.texture.tw === 256 && !this.captureOnce) { if (process.env.GS_CAPTURE_FIRST) this.captureOnce = true; // diagnosis: the texture as drawn
+    if (this.trace && s.texture && this.captureTbp === s.texture.tbp && s.texture.tw === 256 && !this.captureOnce) { if (globalThis.process?.env?.GS_CAPTURE_FIRST) this.captureOnce = true; // diagnosis: the texture as drawn
       const t = s.texture, out = new Uint8Array(t.tw * t.th * 4);
       for (let y = 0; y < t.th; y++) for (let x = 0; x < t.tw; x++) { const c = this.sample({ ...t, wms: 0, wmt: 0 }, x, y); out.set([c & 255, (c >>> 8) & 255, (c >>> 16) & 255, c >>> 24], (y * t.tw + x) * 4); }
       this.captured = { width: t.tw, height: t.th, rgba: out, clut: Array.from(this.clut ?? []).slice(0, 16).map((c) => c.toString(16)) };

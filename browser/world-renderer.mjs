@@ -188,7 +188,7 @@ export class WorldRenderer {
 
   mobyClass(classId) {
     if (this.mobyClasses.has(classId)) return this.mobyClasses.get(classId);
-    let cls = null;
+    let cls;
     try {
       const model = readMobyGeometry(this.planet, classId);
       let rig = null;
