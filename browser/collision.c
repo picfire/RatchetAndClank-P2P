@@ -36,7 +36,11 @@ extern f32 probe_ground_height(void *, s32, f32) __asm__("FUN_00213508");
 u32 spike_collision_unverified_calls;
 u32 spike_collision_unverified(void) { return spike_collision_unverified_calls; }
 #define UNSUPPORTED_ARGUMENTS(condition) do { if (condition) spike_collision_unverified_calls++; } while (0)
-u32 spike_collision_bad_segments;
+u32 spike_collision_bad_segments, spike_collision_bad_spheres;
+/* The host records where the first few non-finite segments come from (its stack has the game's
+   WebAssembly frames). */
+extern void spike_note_bad_segment(const f32 *start, const f32 *end)
+    __attribute__((import_module("env"), import_name("spike_note_bad_segment")));
 f32 spike_collision_first_bad_segment[6];
 #else
 #define UNSUPPORTED_ARGUMENTS(condition) do { if (condition) __builtin_trap(); } while (0)
@@ -475,6 +479,12 @@ s32 collision_sphere(f32 *position, s32 flags, s32 ignored_moby, f32 radius) {
     if (!position) __builtin_trap();
     UNSUPPORTED_ARGUMENTS(flags != 0x24 || ignored_moby);
     s32 result = runtime_collision_capsule(position[0], position[1], position[2], 0, radius);
+#ifdef RNC_SPIKE_COLLISION
+    /* A radius of 0 or above 16 units, or a non-finite position (-2): the retail query runs with
+       such values and finds no face for them (first seen: a horny toad's step_moby_motion probe,
+       radius = motion state + 0x20 / 1024). Counted, answered "no hit". */
+    if (result == -2) { spike_collision_bad_spheres++; result = 0; }
+#endif
     if (result < 0) __builtin_trap();
     return result;
 }
@@ -542,6 +552,7 @@ s32 collision_line(f32 *start, f32 *end, s32 flags, s32 ignored_moby, s32 option
        keeps the first such segment for diagnosis (first seen: a wrench swing's hit sweep after a
        weapon switch, find_moby_hit 0x259d08). */
     if (result == -2) {
+        if (spike_collision_bad_segments < 4) spike_note_bad_segment(start, end);
         if (spike_collision_bad_segments++ == 0)
             for (u32 i = 0; i < 3; i++) { spike_collision_first_bad_segment[i] = start[i]; spike_collision_first_bad_segment[3 + i] = end[i]; }
         result = 0;

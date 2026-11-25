@@ -296,6 +296,36 @@ static inline __attribute__((always_inline)) void pixel_at(int32_t x, int32_t y)
     if (write_z && !s[S_ZMSK] && s[S_ZTE]) write_pixel(s[S_ZPSM], (uint32_t)s[S_ZBP], (uint32_t)s[S_FBW], x, y, z, 0);
 }
 
+/* An untextured pixel of a triangle whose state the fast path accepts (gs_draw below): no texture,
+   no alpha test, CT32 frame without mask, Z test off or ALWAYS over a Z24/Z32 buffer. The same
+   arithmetic as pixel_at's path for that state (the colour truncation, the blend with the four
+   selectors, the Z clamp and the Z24 top-byte keep), without its per-pixel state branches. */
+static inline __attribute__((always_inline)) void untextured_pixel(const int32_t *__restrict s, int32_t x, int32_t y,
+                                                                 double R, double G, double B, double A, double Z) {
+    int32_t r = to_int32(R), g = to_int32(G), b = to_int32(B), a = to_int32(A);
+    const uint32_t page = (uint32_t)(((y >> 5) * s[S_FBW] + (x >> 6)) * 2048 + SWZ32[((y & 31) << 6) | (x & 63)]);
+    uint32_t *fp = (uint32_t *)(memory + (((uint32_t)s[S_FBP] * 64 + page) * 4 & MASK & ~3u));
+    if (s[S_ABE]) {
+        const uint32_t d = *fp;
+        const int32_t dr = d & 255, dg = (d >> 8) & 255, db = (d >> 16) & 255;
+        const int32_t cv = s[S_CSEL] == 0 ? a : s[S_CSEL] == 1 ? (int32_t)(d >> 24) : s[S_FIX];
+#define PA(sel, src, dst2) ((sel) == 0 ? (src) : (sel) == 1 ? (dst2) : 0)
+        const int32_t nr = (((PA(s[S_ASEL], r, dr) - PA(s[S_BSEL], r, dr)) * cv) >> 7) + PA(s[S_DSEL], r, dr);
+        const int32_t ng = (((PA(s[S_ASEL], g, dg) - PA(s[S_BSEL], g, dg)) * cv) >> 7) + PA(s[S_DSEL], g, dg);
+        const int32_t nb = (((PA(s[S_ASEL], b, db) - PA(s[S_BSEL], b, db)) * cv) >> 7) + PA(s[S_DSEL], b, db);
+#undef PA
+        r = nr < 0 ? 0 : nr > 255 ? 255 : nr; g = ng < 0 ? 0 : ng > 255 ? 255 : ng; b = nb < 0 ? 0 : nb > 255 ? 255 : nb;
+    }
+    *fp = (uint32_t)(r | g << 8 | b << 16 | ((a | s[S_FBA]) & 0xFF) << 24);
+    gs_pixels += 1;
+    if (s[S_ZTE] && !s[S_ZMSK]) {
+        const double zd = Z <= 0 ? 0 : Z >= 4294967295.0 ? 4294967295.0 : floor(Z);
+        const uint32_t z = (uint32_t)zd;
+        uint32_t *zp = (uint32_t *)(memory + (((uint32_t)s[S_ZBP] * 64 + page) * 4 & MASK & ~3u));
+        *zp = s[S_ZPSM] == Z24 ? (*zp & 0xFF000000u) | (z & 0xFFFFFF) : z;
+    }
+}
+
 #define VX(i) gs_vertices[(i) * 12 + 0]
 #define VY(i) gs_vertices[(i) * 12 + 1]
 #define VZ(i) gs_vertices[(i) * 12 + 2]
@@ -351,6 +381,9 @@ void gs_draw(int32_t type) {
            rather than recomputing them. w2 = 1 - w0 - w1, so P = Pc + (Pa - Pc) w0 + (Pb - Pc) w1. */
         const double d0 = (VY(b) - VY(c)) * inv, d1 = (VY(c) - VY(a)) * inv;
         const int iip = s[S_IIP], fst = s[S_FST];
+        const int untextured_fast = !s[S_TME] && s[S_FPSM] == CT32 && !s[S_FB16] && !s[S_ATE] && !s[S_FBMSK] && !s[S_PABE] &&
+                                    s[S_SCX0] <= minX && maxX <= s[S_SCX1] && s[S_SCY0] <= minY && maxY <= s[S_SCY1] &&
+                                    (!s[S_ZTE] || (s[S_ZTST] == 1 && (s[S_ZPSM] == Z24 || s[S_ZPSM] == Z32)));
 #define STEP(V) const double V##c = V(c), V##a = V(a) - V##c, V##b = V(b) - V##c, V##dx = V##a * d0 + V##b * d1;
         STEP(VZ) STEP(VR) STEP(VG) STEP(VB) STEP(VA) STEP(VU) STEP(VV) STEP(VS) STEP(VT) STEP(VQ)
 #undef STEP
@@ -366,7 +399,11 @@ void gs_draw(int32_t type) {
             int inside = 0;
             for (double x = minX; x <= maxX; x++) {
                 const double w2 = 1 - w0 - w1;
-                if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
+                if (w0 >= 0 && w1 >= 0 && w2 >= 0 && untextured_fast) {
+                    inside = 1;
+                    if (iip) untextured_pixel(s, (int32_t)x, (int32_t)y, r, g, bl, al, z);
+                    else untextured_pixel(s, (int32_t)x, (int32_t)y, P_R, P_G, P_B, P_A, z);
+                } else if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
                     inside = 1;
                     P_Z = z;
                     if (iip) { P_R = r; P_G = g; P_B = bl; P_A = al; }

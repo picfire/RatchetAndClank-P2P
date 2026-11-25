@@ -481,7 +481,7 @@ export class GsRenderer {
         frame: [s.fbp, s.fbw, s.fpsm], fbmsk: (s.fbmsk >>> 0).toString(16), zte: s.zte, ztst: s.ztst, zbp: s.zbp, blend: [s.asel, s.bsel, s.csel, s.dsel, s.fix], tfx: s.texture?.tfx, tcc: s.texture?.tcc, fba: s.fba, pabe: s.pabe });
       if (this.trace.length > 400) this.trace.shift();
     }
-    if (this.trace && s.texture && this.captureTbp === s.texture.tbp && s.texture.tw === 256 && !this.captureOnce) { if (globalThis.process?.env?.GS_CAPTURE_FIRST) this.captureOnce = true; // diagnosis: the texture as drawn
+    if (this.trace && s.texture && this.captureTbp === s.texture.tbp && !this.captureOnce) { if (globalThis.process?.env?.GS_CAPTURE_FIRST) this.captureOnce = true; // diagnosis: the texture as drawn
       const t = s.texture, out = new Uint8Array(t.tw * t.th * 4);
       for (let y = 0; y < t.th; y++) for (let x = 0; x < t.tw; x++) { const c = this.sample({ ...t, wms: 0, wmt: 0 }, x, y); out.set([c & 255, (c >>> 8) & 255, (c >>> 16) & 255, c >>> 24], (y * t.tw + x) * 4); }
       this.captured = { width: t.tw, height: t.th, rgba: out, clut: Array.from(this.clut ?? []).slice(0, 16).map((c) => c.toString(16)) };
@@ -500,9 +500,16 @@ export class GsRenderer {
       const xs = vs.map((v) => v.x), ys = vs.map((v) => v.y), [px, py] = this.probePoint;
       if (Math.min(...xs) <= px && px <= Math.max(...xs) && Math.min(...ys) <= py && py <= Math.max(...ys)) {
         const t = s.texture;
-        const key = `type ${type} tex ${t ? `${t.psm.toString(16)}@${t.tbp.toString(16)}` : 'none'} zte ${s.zte} ztst ${s.ztst} abe ${s.abe} fst ${s.fst} z ${Math.round(vs[0].z)}`;
+        const key = `type ${type} tex ${t ? `${t.psm.toString(16)}@${t.tbp.toString(16)}` : 'none'} zte ${s.zte} ztst ${s.ztst} zmsk ${s.zmsk} abe ${s.abe} fst ${s.fst} z ${Math.round(vs[0].z)} q ${(+vs[0].q).toFixed(3)}`;
         this.probeHits.set(key, (this.probeHits.get(key) ?? 0) + 1);
       }
+    }
+    // The sky's last layers come after the frame's second VU1 start: 3D triangles with the Z test
+    // set to always pass and no Z write. While the runtime waits for them (skyPending), the first
+    // primitive of any other kind ends the sky: the sky layer is taken before it is drawn.
+    if (this.skyPending) {
+      const skyPrimitive = type >= 3 && type <= 5 && s.zte && s.ztst === 1 && s.zmsk && !s.fst;
+      if (!skyPrimitive) this.onSkyDone?.();
     }
     if (this.native) { this.drawNative(type, q, s); return; }
     if (type === 6) this.sprite(q[q.length - 2], q[q.length - 1], s);
@@ -530,13 +537,14 @@ export class GsRenderer {
       vs[o + 7] = v.q; vs[o + 8] = v.s; vs[o + 9] = v.t; vs[o + 10] = v.u; vs[o + 11] = v.vv;
     }
     const before = this.native.gs_pixel_count();
-    const started = this.costs ? performance.now() : 0;
+    const started = this.costs || this.timing ? performance.now() : 0;
     this.native.gs_draw(type);
+    if (this.timing) this.timing.gs += performance.now() - started;
     const drawn = (this.native.gs_pixel_count() - before) >>> 0;
     this.stats.pixels += drawn;
     if (this.costs) { // diagnosis: time and pixels per kind of primitive
       const t = s.texture;
-      const key = `type ${type} tex ${t ? `${t.psm.toString(16)}@${t.tbp.toString(16)} ${t.mmag ? 'bilinear' : 'nearest'}` : 'none'} -> fb ${s.fbp.toString(16)} abe ${s.abe} zte ${s.zte} ${this.phase}`;
+      const key = `type ${type} tex ${t ? `${t.psm.toString(16)}@${t.tbp.toString(16)} ${t.mmag ? 'bilinear' : 'nearest'}` : 'none'} -> fb ${s.fbp.toString(16)} abe ${s.abe} zte ${s.zte} ztst ${s.ztst} zmsk ${s.zmsk} iip ${s.iip} ate ${s.ate} blend ${s.asel}${s.bsel}${s.csel}${s.dsel} fix ${s.fix} pabe ${s.pabe} fba ${s.fba} fbmsk ${s.fbmsk} fpsm ${s.fpsm} zpsm ${s.zpsm} ${this.phase}`;
       const c = this.costs.get(key) ?? { n: 0, px: 0, ms: 0 };
       c.n += 1; c.px += drawn; c.ms += performance.now() - started;
       this.costs.set(key, c);

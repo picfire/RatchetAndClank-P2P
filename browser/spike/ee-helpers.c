@@ -2958,3 +2958,151 @@ f32 jet_distance_l00(const f32 *a, const f32 *b) {
     const f32 k = 1.0f / 1024.0f;
     return k * __builtin_sqrtf(dx * dx + dy * dy + dz * dz) - k * (a[3] + b[3]);
 }
+
+/* collect_mobies_in_sphere, level 0x1f2868 (578 instructions of EE/VU0 assembly, level code only):
+   count = collect(position, mask, excluded_moby, hit_descriptor, radius f12). Decoded:
+   - 0x1f2868-0x1f2938: radius <= 0 or a negative search stamp ([0x173e50]) returns 0; the stamp
+     is incremented (written back) and used to test each moby once.
+   - 0x1f2940-0x1f29b8: the cells of the moby grid (0x19b7e0, 16-unit cells, u16 moby indexes at
+     +0x4000) under the sphere's box are listed. ADAPTED: the browser build does not fill that grid
+     (update_entity's grid stage is not ported), so every live moby in the table
+     (level_moby_table .. moby_instance_end) is visited instead, which is a superset of those cells.
+   - 0x1f29d0-0x1f2a5c, per moby: skip the excluded moby, one without collision data (+0x94), one
+     already stamped (+0x9c); test its bounding sphere (+0x00: xyz = position * 1024, w = radius
+     in the same units) against the query (position * 1024, radius * 1024): skip when
+     |d|^2 - (r + w)^2 > 0; stamp it.
+   - 0x1f2a60-0x1f3054: the moby's collision triangles (unpacked through level 0x2531e0 into an
+     8-entry cache) are tested against the sphere, with mask filters on triangle flags (0x80,
+     0x20, material bits >> 8). ADAPTED: not ported; a moby whose bounding sphere overlaps is
+     taken as touched, so the result can include mobys the console's triangle test would reject.
+   - 0x1f3058-0x1f3100: the list of mobys (0x177f00, zero-terminated) is the output; the hit
+     record at 0x173e40 gets +0x20 = (0, 0, 0, 1), +0x1c = 0x3f, +0x18 = the first moby.
+     With a hit descriptor, each listed moby whose +0x34 has 0x4000 gets a 64-byte damage record
+     in the ring at 0x178100 (index [0x173e40 + 0x14], 64 entries): +0x00 = (0, 0, 0, 1), +0x10..
+     +0x2f = descriptor bytes 0..0x1f, +0x30 = descriptor word 0x20, +0x34 = moby, +0x38 = 0, and
+     moby +0xa4 = its index. When the moby already holds a record for itself whose +0x2c exceeds
+     the new descriptor's +0x1c, it is left alone. Returns the number listed. */
+extern u8 *level_moby_table_end __asm__("D_0015FF1C") /* moby_instance_end; level copy D_L00_0015FFDC */;
+s32 spike_sphere_queries, spike_sphere_hits;
+s32 collect_mobies_in_sphere_l00(const f32 *position, s32 mask, u8 *excluded, const u8 *descriptor, f32 radius)
+    __asm__("FUN_L00_001f2868");
+s32 collect_mobies_in_sphere_l00(const f32 *position, s32 mask, u8 *excluded, const u8 *descriptor, f32 radius) {
+    u8 *hit = (u8 *)0x173e40;
+    u8 **list = (u8 **)0x177f00;
+    u8 *ring = (u8 *)0x178100;
+    s32 *stamp = (s32 *)(hit + 0x10);
+    s32 count = 0;
+    (void)mask;
+    spike_sphere_queries++;
+    if (*stamp < 0 || !(radius > 0.0f)) return 0;
+    const s32 now = ++*stamp;
+    const f32 qx = position[0] * 1024.0f, qy = position[1] * 1024.0f, qz = position[2] * 1024.0f, qr = radius * 1024.0f;
+    for (u8 *m = level_moby_table; m && m < level_moby_table_end && count < 0x7f; m += 0x100) {
+        if (m[0x20] == 0xFF || m == excluded) continue;
+        if (!*(u32 *)(m + 0x94) || *(s32 *)(m + 0x9c) == now) continue;
+        const f32 *bs = (const f32 *)m;
+        const f32 dx = bs[0] - qx, dy = bs[1] - qy, dz = bs[2] - qz, r = qr + bs[3];
+        if ((dx * dx + dy * dy + dz * dz) - r * r > 0.0f) continue;
+        *(s32 *)(m + 0x9c) = now;
+        list[count++] = m;
+    }
+    list[count] = 0;
+    {
+        const f32 one[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        __builtin_memcpy(hit + 0x20, one, 16);
+        *(s32 *)(hit + 0x1c) = 0x3f;
+        *(u8 **)(hit + 0x18) = list[0];
+    }
+    if (descriptor && count) {
+        s32 next = *(s32 *)(hit + 0x14);
+        for (s32 i = 0; i < count; i++) {
+            u8 *m = list[i];
+            if (!(*(u16 *)(m + 0x34) & 0x4000)) continue;
+            const s8 held = (s8)m[0xa4];
+            if (held >= 0) {
+                const u8 *old = ring + 64 * held;
+                if (*(u8 *const *)(old + 0x34) == m && *(const s32 *)(old + 0x2c) - *(const s32 *)(descriptor + 0x1c) > 0) continue;
+            }
+            u8 *entry = ring + 64 * next;
+            const f32 one[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+            __builtin_memcpy(entry, one, 16);
+            *(u32 *)(entry + 0x38) = 0;
+            __builtin_memcpy(entry + 0x10, descriptor, 32);
+            *(u32 *)(entry + 0x30) = *(const u32 *)(descriptor + 0x20);
+            *(u8 **)(entry + 0x34) = m;
+            m[0xa4] = (u8)next;
+            next = (next + 1) & 0x3f;
+        }
+        *(s32 *)(hit + 0x14) = next;
+    }
+    spike_sphere_hits += count;
+    return count;
+}
+
+/* Small library routines the level program reaches at their boot addresses. */
+/* strcpy (0x1165b8; select_auto_aim_target_moby declares it with no result). */
+void game_strcpy(char *out, const char *in) __asm__("FUN_001165b8");
+void game_strcpy(char *out, const char *in) { while ((*out++ = *in++) != 0) {} }
+/* strlen (0x1166cc; draw_hud_item_selector_panel). */
+s32 game_strlen(const char *text) __asm__("FUN_001166cc");
+s32 game_strlen(const char *text) { s32 n = 0; while (text[n]) n++; return n; }
+/* music_pause (0x216050, 13 instructions): with a0 set, the halfwords at music_stream_state
+   (D_001516D0) + 0x5c / 0x5e become 0x8000 / 0; always + 0x78 / 0x7a and + 0x40 / 0x42 likewise.
+   The vendor menu calls it to pause the level music. */
+extern u8 music_stream_state_bytes[] __asm__("D_001516D0");
+void music_pause(s32 all) __asm__("FUN_00216050");
+void music_pause(s32 all) {
+    if (all) { *(u16 *)(music_stream_state_bytes + 0x5c) = 0x8000; *(u16 *)(music_stream_state_bytes + 0x5e) = 0; }
+    *(u16 *)(music_stream_state_bytes + 0x78) = 0x8000; *(u16 *)(music_stream_state_bytes + 0x7a) = 0;
+    *(u16 *)(music_stream_state_bytes + 0x40) = 0x8000; *(u16 *)(music_stream_state_bytes + 0x42) = 0;
+}
+/* 0x1f97b0: a `syscall`-class trap word (0x34, teq) then return: the game's fatal-error stop
+   (called after "out of memory" style checks). Stops here as there. */
+void raise_kernel_trap(void) __asm__("FUN_001f97b0");
+void raise_kernel_trap(void) { __builtin_trap(); }
+/* Level 0x2678c0, create_part's body: the entry 0x2678b8 is `j 0x2678c0` with a1 = 0, and the body
+   never reads a1 (it only reuses the register), so create_part2(type, any) is create_part(type). */
+u8 *create_part2(s32 type, s32 unused) __asm__("FUN_L00_002678c0");
+u8 *create_part2(s32 type, s32 unused) { (void)unused; return create_part(type); }
+
+/* Level 0x1fde98 (125 instructions, level code only): appends a VU1 packet for `count` points to
+   the render buffer at the render cursor (gp - 0x5a40, render_cursor_bytes), as read from the
+   listing:
+   - five quadwords of template from 0x1c4020 (DMA/VIF tags); the second's first word |= count;
+   - the VIF UNPACK quadword at 0x160ec0 with count << 16 OR-ed into its last word, then count
+     8-byte entries from a3, padded to 16 bytes with zero words;
+   - the same with the template at 0x160ee0 and count 4-byte colours from a2;
+   - the same with the template at 0x160f00 and count 12-byte points from a1;
+   - MSCAL 0x15000000 | (0xc + 2 * (mode & 1)) and FLUSH 0x11000000, then 8 zero bytes;
+   - the first word at the old cursor |= the packet's quadwords - 1 (its DMA tag), and the cursor
+     moves past the packet.
+   Used for the ocean's and the thruster flame's batches. The browser runs no VU1 microcode, so
+   the packet is built (as on the console) but not drawn. */
+void emit_vu1_point_batch(s32 count, const u8 *points, const u32 *colours, const u8 *entries, s32 mode)
+    __asm__("FUN_L00_001fde98");
+void emit_vu1_point_batch(s32 count, const u8 *points, const u32 *colours, const u8 *entries, s32 mode) {
+    u8 *start = render_cursor_bytes, *at = start;
+    const u32 unpack_count = (u32)count << 16;
+    __builtin_memcpy(at, (const void *)0x1c4020, 0x50);
+    at += 0x50;
+    *(u32 *)(at - 0x40) |= (u32)count;
+#define BLOCK(template, source, size)                                                     \
+    do {                                                                                  \
+        __builtin_memcpy(at, (const void *)(template), 16);                               \
+        at += 16;                                                                         \
+        *(u32 *)(at - 4) |= unpack_count;                                                 \
+        __builtin_memcpy(at, (source), (u32)count * (size));                              \
+        at += (u32)count * (size);                                                        \
+        while ((u32)(unsigned long)at & 0xf) { *(u32 *)at = 0; at += 4; }                  \
+    } while (0)
+    BLOCK(0x160ec0, entries, 8);
+    BLOCK(0x160ee0, colours, 4);
+    BLOCK(0x160f00, points, 12);
+#undef BLOCK
+    *(u32 *)(at + 0) = 0x15000000u | (u32)(0xc + 2 * (mode & 1));
+    *(u32 *)(at + 4) = 0x11000000u;
+    *(u64 *)(at + 8) = 0;
+    at += 16;
+    *(u32 *)start |= (u32)((at - start) / 16 - 1);
+    render_cursor_bytes = at;
+}

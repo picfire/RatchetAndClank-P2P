@@ -234,12 +234,22 @@ export function onHandover(context, level) {
 }
 
 export function report(context) {
+  if (process.env.MOBY_DUMP) {
+    const v = context.view(), f = (a) => +v.getFloat32(a, true).toFixed(2);
+    const b = v.getUint32(0x15FFD8, true), e = v.getUint32(0x15FFDC, true); let shown = 0;
+    for (let m = b; m < e && shown < 14; m += 0x100) {
+      if (v.getUint8(m + 0x20) === 0xFF) continue;
+      const coll = v.getUint32(m + 0x94, true); if (!coll) continue; shown++;
+      console.log(`moby 0x${m.toString(16)} class ${v.getInt16(m + 0xA6, true)} state ${v.getUint8(m + 0x20)} bs [${[0, 4, 8, 12].map((o) => f(m + o))}] pos [${[0x10, 0x14, 0x18].map((o) => f(m + o))}] scale ${f(m + 0x2c)} flags34 0x${v.getUint16(m + 0x34, true).toString(16)} coll 0x${coll.toString(16)} a4 ${v.getInt8(m + 0xa4)} 9c ${v.getInt32(m + 0x9c, true)}`);
+    }
+    console.log(`search stamp ${v.getInt32(0x173e50, true)} grid cell sample ${[0, 4, 8].map((o) => v.getUint32(0x19B7E0 + 0x2000 + o, true).toString(16))}`);
+  }
   if (process.env.HUD_DUMP) {
     const v = context.view();
     for (let i = 0; i < 13; i++) { const e = 0x17DC50 + i * 0x90; console.log(`hud ${i}: key 0x${v.getInt32(e + 0x64, true).toString(16)} fn ${v.getUint32(e + 0x10, true)} next_id 0x${v.getInt32(e + 0x20, true).toString(16)} next_fn ${v.getUint32(e + 0x30, true)} update ${v.getUint32(e + 0x14, true)} pending ${v.getInt32(e + 0x68, true)} t6C ${v.getInt32(e + 0x6C, true)}`); }
   }
   const word = (name) => context.exports[name] ? context.view().getUint32(context.exports[name].value, true) : '?';
-  console.log(`layer poses ${word('rnc_layer_pose_calls')}, with NaN ${word('rnc_layer_pose_nan')}; bad collision segments ${word('spike_collision_bad_segments')}`);
+  console.log(`sphere queries ${word('spike_sphere_queries')}, mobys found ${word('spike_sphere_hits')}; layer poses ${word('rnc_layer_pose_calls')}, with NaN ${word('rnc_layer_pose_nan')}; bad collision segments ${word('spike_collision_bad_segments')}`);
   console.log(`local pose evaluations (level 0x254b58): ${context.exports.spike_local_pose_calls ? context.view().getUint32(context.exports.spike_local_pose_calls.value, true) : '?'}`);
   if (BOOT) { // the boot program's front end (its own addresses)
     const v = context.view();

@@ -135,7 +135,8 @@ export class WorldRenderer {
     }
   }
 
-  // Mobys, from the game's own moby table each frame (see the header): class (+0xAA), state
+  // Mobys, from the game's own moby table each frame (see the header): class (+0xA6, `oclass` in
+  // include/rnc/mobys/moby.h; +0xAA is the moby's slot number, not its class), state
   // (+0x20, < 0 = inactive), position (+0x10), scale (+0x2C), basis rows (+0xC0..+0xE0), and the
   // joint matrices the game's pose code computes (matrices(moby) -> joint count, matrix(j) ->
   // 16 floats). A skinned class's bone j gets
@@ -152,7 +153,8 @@ export class WorldRenderer {
     const seen = new Set();
     for (let m = begin; m < end; m += VELDIN_MOBYS.stride) {
       if (view.getInt8(m + 0x20) < 0) continue;
-      const classId = view.getUint16(m + 0xAA, true);
+      const classId = view.getInt16(m + 0xA6, true);
+      if (classId < 0) continue;
       const cls = this.mobyClass(classId);
       if (!cls) continue;
       const key = `${m}:${classId}`;
@@ -331,8 +333,11 @@ export class WorldRenderer {
   // Draws the world into the display canvas at its current size (drawDisplay) ...
   drawDisplay(view, xyoffset, matrices = null) {
     const c = this.display;
-    const w = Math.max(1, Math.round(c.clientWidth * (globalThis.devicePixelRatio || 1)));
-    const h = Math.max(1, Math.round(c.clientHeight * (globalThis.devicePixelRatio || 1)));
+    // The display's pixel density, capped (pixelRatioCap, default 1.5): a Retina screen in
+    // fullscreen would otherwise mean a 5K-wide antialiased render every frame.
+    const ratio = Math.min(globalThis.devicePixelRatio || 1, this.pixelRatioCap ?? 1.5);
+    const w = Math.max(1, Math.round(c.clientWidth * ratio));
+    const h = Math.max(1, Math.round(c.clientHeight * ratio));
     if (c.width !== w || c.height !== h) this.renderer.setSize(w, h, false);
     this.updateCamera(view, xyoffset);
     if (matrices && this.planet) this.syncMobys(view, matrices);

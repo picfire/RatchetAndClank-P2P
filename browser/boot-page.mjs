@@ -20,6 +20,27 @@ const KEYS = { ArrowUp: PAD.up, ArrowDown: PAD.down, ArrowLeft: PAD.left, ArrowR
   KeyX: PAD.cross, Space: PAD.cross, KeyC: PAD.circle, KeyZ: PAD.square, KeyV: PAD.triangle, Backspace: PAD.select,
   KeyQ: PAD.l1, KeyE: PAD.r1, Digit1: PAD.l2, Digit3: PAD.r2 };
 let keys = 0;
+// P: a small performance overlay (frames per second; milliseconds per frame in the GS rasterizer,
+// the WebGL world, and everything else: the game's own code and the page).
+const perf = document.createElement('div');
+perf.style.cssText = 'position:fixed;top:8px;right:8px;z-index:9;padding:6px 10px;border-radius:6px;background:rgba(0,0,0,.72);color:#d9d6e6;font:12px/1.4 ui-monospace,monospace;white-space:pre;display:none';
+document.body.append(perf);
+addEventListener('keydown', (event) => {
+  if (event.code !== 'KeyP' || event.repeat) return;
+  const rt = globalThis.rncBoot;
+  if (!rt) return;
+  const on = perf.style.display === 'none';
+  perf.style.display = on ? 'block' : 'none';
+  rt.timing = rt.gs.timing = on ? { frames: 0, period: 0, gs: 0, world: 0 } : null;
+  if (on) rt.gs.timing = rt.timing;
+});
+setInterval(() => {
+  const t = globalThis.rncBoot?.timing;
+  if (!t || !t.frames) return;
+  const n = t.frames, frame = t.period / n;
+  perf.textContent = `${(1000 / frame).toFixed(1)} fps   ${frame.toFixed(1)} ms/frame\nGS rasterizer ${(t.gs / n).toFixed(1)} ms\n3D world      ${(t.world / n).toFixed(1)} ms\ngame + page   ${Math.max(0, frame - (t.gs + t.world) / n).toFixed(1)} ms`;
+  t.frames = 0; t.period = 0; t.gs = 0; t.world = 0;
+}, 1000);
 addEventListener('keydown', (event) => {
   if (event.code !== 'KeyF' || event.repeat) return;
   const stage = document.getElementById('stage');
@@ -162,6 +183,19 @@ document.getElementById('disc').addEventListener('change', async (event) => {
     // Where the game stopped: the innermost WebAssembly functions (their names are the game's labels).
     const where = (error.stack ?? '').split('\n').map((line) => line.match(/at (?:\w+\.wasm\.)?([\w.$]+) \(.*wasm-function/)?.[1]).filter(Boolean).slice(0, 6);
     say(`Stopped at frame ${globalThis.rncBoot?.frames ?? '?'} (${globalThis.rncBoot?.program ?? 'boot'} program): ${error.message}${where.length ? ` in ${where.join(' <- ')}` : ''}`);
+    // Tell the local server (serve.py writes build/reports/stops.jsonl): the error, where it
+    // stopped and where the hero stood, so the stop can be found again.
+    try {
+      const rt = globalThis.rncBoot, v = rt?.view?.();
+      let hero = null;
+      if (v && rt.program !== 'boot') {
+        const start = v.getUint32(0x15FFD8, true), end = v.getUint32(0x15FFDC, true);
+        for (let m = start; m && m < end; m += 0x100) if (v.getInt16(m + 0xA6, true) === 0) { hero = [0x10, 0x14, 0x18].map((o) => +v.getFloat32(m + o, true).toFixed(2)); break; }
+      }
+      fetch('/__report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        message: error.message, where, frame: rt?.frames, program: rt?.program, hero, stack: String(error.stack ?? '').slice(0, 4000),
+      }) }).catch(() => {});
+    } catch { /* reporting is best effort */ }
     console.error(error);
   }
 });

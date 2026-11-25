@@ -43,6 +43,13 @@ static u8 spr[SPR_BYTES] __attribute__((aligned(16)));
 
 static f32 *spr_vec(u32 offset) { return (f32 *)(spr + (offset & (SPR_BYTES - 1))); }
 static u32 *spr_word(u32 offset) { return (u32 *)(spr + (offset & (SPR_BYTES - 1))); }
+/* 1 / sqrt(|x|) as the VU's vrsqrt / vdiv give it: the VU has no infinities, so x = 0 yields the
+   largest float instead of +inf. A zero quaternion then stays zero (0 * max = 0) as on the
+   console, instead of becoming NaN (0 * inf) and spreading into every joint matrix. */
+static f32 vu_rsqrt(f32 x) {
+    const f32 r = __builtin_sqrtf(__builtin_fabsf(x));
+    return r > 0.0f ? 1.0f / r : 3.40282347e38f;
+}
 static u32 rd32(const u8 *p) { u32 v; __builtin_memcpy(&v, p, 4); return v; }
 static u16 rd16(const u8 *p) { u16 v; __builtin_memcpy(&v, p, 2); return v; }
 static s16 rds16(const u8 *p) { s16 v; __builtin_memcpy(&v, p, 2); return v; }
@@ -75,7 +82,7 @@ static void blend_weighted(f32 *out, const f32 *a, const f32 *b) {
     if (float_bits(dot_y(a, b)) >> 31) {
         for (s32 i = 0; i < 4; i++) v[i] = a[i] - b[i];
     }
-    inv = 1.0f / __builtin_sqrtf(__builtin_fabsf(length2_x(v)));
+    inv = vu_rsqrt(length2_x(v));
     for (s32 i = 0; i < 4; i++) out[i] = v[i] * inv;
 }
 
@@ -195,7 +202,7 @@ static void compute_local_pose(u8 *m, const u8 *joint_flags) {
                         for (s32 i = 0; i < 4; i++) q[i] = a[i] * s + (-b[i]) * t;
                     }
                     {
-                        const f32 inv = 1.0f / __builtin_sqrtf(__builtin_fabsf(length2_x(q)));
+                        const f32 inv = vu_rsqrt(length2_x(q));
                         for (s32 i = 0; i < 4; i++) q[i] *= inv;
                     }
                 }

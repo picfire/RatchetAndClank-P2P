@@ -1243,6 +1243,73 @@ pose with `pack_pose`. Two stops were on that path:
   the follow camera reads the left stick (`follow_camera_setup.c`).
 - Headless Chrome, gameplay: 58 fps with the depth pass.
 
+### Twelfth pass (2026-11-25): the game finds objects
+
+**`collect_mobies_in_sphere` (level 0x1f2868).** It was deferred (answered "0 found"), so
+every caller took the nothing-found branch: about 4,000 calls in a 4,400-frame run (camera,
+weapons, mines, pickups, enemies). It is now ported (`ee-helpers.c`).
+- The outputs are decoded from the listing:
+  - the zero-terminated moby list at 0x177f00 and the returned count;
+  - the hit record at 0x173e40 (+0x18 first moby, +0x1c 0x3f, +0x20 (0,0,0,1));
+  - the per-query stamp (+0x10, moby +0x9c);
+  - with a hit descriptor, the 64-entry damage ring at 0x178100 (moby +0xa4 = slot), including
+    the rule that keeps a stronger existing record.
+- ADAPTED, two parts:
+  - the moby grid (0x19b7e0) is not filled in the browser build, so every live moby in the
+    table is visited;
+  - a moby whose bounding sphere (+0x00: position × 1024, radius in w) overlaps is taken as
+    touched; the triangle test against its collision mesh and the mask filters are not ported.
+- Measured in Node, 4,400 frames with weapons: 4,038 queries, 16 mobys found.
+
+**Missing functions, 45 → 35.**
+- `movie_exit_to_gameplay`'s texture reload: the GS load-image calls bound at 0x122518 /
+  0x1227d8, and `sceGsSyncVCallback` (0x122e68) as the host vblank hook.
+- `strcpy`, `strlen`, `music_pause`.
+- The fatal-error trap 0x1f97b0.
+- `create_part2` (level 0x2678c0: the same allocator; a1 is never read).
+
+**Collision.** `collision_sphere` (spike build) answers "no hit" for a radius of 0 or above
+16, or a non-finite position, as the console's query would. It is counted in
+`spike_collision_bad_spheres`. First seen: a horny toad's `step_moby_motion` probe, reached
+once the game could find objects.
+
+### Twelfth pass, sky layering (2026-11-25)
+
+- **The world point is the second VU1 start.** Five views on Veldin were traced. Every frame's
+  list has exactly two VU1 program starts. The GIF packets between them vary with how much sky
+  is in view (14 to 35 packets), so they are sky. The sky snapshot and the world-depth hand-off
+  now happen at the second start.
+- **Late sky layers.** Some sky triangles are drawn after that point. The ones found are
+  textured triangles (T8 at 0x3203) with Z test ALWAYS, no Z write, depth 0. On the console
+  the world is drawn after them; here they are given GEQUAL (gs-renderer.mjs), so the world's
+  depth in the Z buffer hides them.
+  - Before: a band of nebula across the tops of trees and rocks (seen with the front layer
+    hidden: the world and sky layers alone were right).
+  - Checked by screenshot in the same view.
+- **Test browsers are muted** (`--mute-audio`): headless page runs had played the game's movies
+  through the speakers.
+
+### Twelfth pass, objects (2026-11-25)
+
+- **Moby class field.** `WorldRenderer.syncMobys` read the class at moby +0xAA. That is the
+  moby's slot number; the class is `oclass` at +0xA6 (include/rnc/mobys/moby.h).
+  - Dumped from the page: slot 1 has class 809, slot 2 class 13 (a bolt), and spawned mobys
+    have class 1782.
+  - So every moby was drawn with the model of its slot number, and mobys whose slot number
+    named no model were not drawn. Among them were the thrown bombs (class 121) and Ratchet's
+    ship (its cockpit canopy, drawn by the game itself, had seemed to float alone).
+  - Now read from +0xA6 (negative: skipped).
+- **Untextured triangle fast path** (`gs-raster.c untextured_pixel`): CT32 frame without mask, no
+  alpha test, Z test off or ALWAYS over Z24/Z32. It does the same arithmetic as `pixel_at`. The
+  sky's full-screen gradient goes from 15.2 to 12.6 ns per pixel (Node microbenchmark).
+- **Stop reports.** When the game stops, the page posts the error, the stopping functions, the
+  frame and the hero's position to `/__report`. `serve.py` appends them to
+  `build/reports/stops.jsonl`, outside the served folder.
+- **Performance overlay (P):** fps, and per frame the GS rasterizer, the WebGL world, and the
+  rest. The world's pixel density is capped at 1.5.
+- **Level 0x1fde98** (VU1 point-batch packet builder; ocean, thruster flame) is ported. Its packet
+  is built as on the console and not drawn (no VU1 microcode).
+
 ### Scenery, Fog, And The Interim Page Layer (2026-11-14)
 
 **Scenery (ties).** [tie-geometry.mjs](../../browser/tie-geometry.mjs) decodes tie classes

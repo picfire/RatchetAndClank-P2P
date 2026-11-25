@@ -92,6 +92,16 @@ s32 sceGsExecLoadImage(void *image, u32 source) {
     return 0;
 }
 
+/* The same two calls at their SDK addresses, as the level program's movie_exit_to_gameplay
+   (update_cutscene_playback.c) makes them after an in-level movie to reload the level's textures:
+   declared there with no result. */
+void gs_set_def_load_image_at(void *image, s32 dbp, s32 dbw, s32 psm, s32 x, s32 y, s32 w, s32 h) __asm__("FUN_00122518");
+void gs_set_def_load_image_at(void *image, s32 dbp, s32 dbw, s32 psm, s32 x, s32 y, s32 w, s32 h) {
+    sceGsSetDefLoadImage(image, dbp, dbw, psm, x, y, w, h);
+}
+void gs_exec_load_image_at(void *image, u32 source) __asm__("FUN_001227d8");
+void gs_exec_load_image_at(void *image, u32 source) { sceGsExecLoadImage(image, source); }
+
 s32 sceGsSyncPath(s32 mode, s32 timeout) __asm__("FUN_00120558");
 s32 sceGsSyncPath(s32 mode, s32 timeout) {
     (void)mode;
@@ -706,6 +716,12 @@ s32 spike_gs_crt_interlace(void) { return gs_crt_interlace; }
 s32 spike_gs_crt_field(void) { return gs_crt_field; }
 s32 GsPutIMR(s32 imr) { *(volatile u64 *)0x12001010 = (u64)(u32)imr; return 0; }
 void SetGsCrt(s32 interlace, s32 mode, s32 field) { gs_crt_interlace = interlace; gs_crt_mode = mode; gs_crt_field = field; }
+/* sceGsSyncVCallback (0x122e68): installs the vertical-blank callback (0 removes it) through the
+   kernel's INTC handlers (0x121a08 / 0x119028 / 0x1187a0 in the listing); here it is the host's
+   vblank hook. movie_exit_to_gameplay reinstalls count_vsync with it after an in-level movie. */
+void gs_sync_v_callback(int (*callback)(void)) __asm__("FUN_00122e68");
+void gs_sync_v_callback(int (*callback)(void)) { vblank_handler = callback; }
+
 s32 RemoveIntcHandler(s32 cause, s32 id) { (void)id; if (cause == 2) vblank_handler = 0; return 0; }
 /* RemoveDmacHandler / DisableDmac (0x1190f8): DMA-end interrupts. No DMAC handler is installed
    in this build (dmac_vif1_enable is deferred; DMA channels complete inside their services), so

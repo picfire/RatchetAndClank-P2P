@@ -145,10 +145,16 @@ export class BootRuntime {
       case 'spike_debug_print': return (at) => this.log(`game: ${this.cString(at).replace(/\n$/, '')}`);
       case 'spike_deferred': return (nameAt) => { const key = this.cString(nameAt); this.deferred.set(key, (this.deferred.get(key) ?? 0) + 1); };
       case 'spike_unimplemented_rpc': return (server, fn) => { throw new Error(`IOP RPC server 0x${(server >>> 0).toString(16)} is not implemented (function ${fn})`); };
+      case 'spike_note_bad_segment': return (start, end) => {
+        const v = this.view(), f = (a) => v.getFloat32(a, true);
+        const frames = (new Error().stack ?? '').split('\n').map((l) => l.match(/at (?:\w+\.wasm\.)?([\w.$]+) \(.*wasm-function/)?.[1]).filter(Boolean).slice(1, 8);
+        (this.badSegments ??= []).push({ frame: this.frames, start: [0, 4, 8].map((o) => f(start + o)), end: [0, 4, 8].map((o) => f(end + o)), frames });
+      };
       case 'spike_world_pass': return () => {
         // services.c tfrag_proc: the level's world, drawn by the browser renderer into this frame.
         if (!this.world || this.program === 'boot') return;
         this.worldPasses += 1;
+        if (this.gs.skyPending) this.finishSkyLayer();
         if (this.trace) this.trace.push('W');
         this.gs.phase = 'after-world';
         const e = this.exports;
@@ -163,7 +169,9 @@ export class BootRuntime {
           // in the displayed one, so the snapshot is of the drawing buffer.
           this.background = { ...this.gs.frameBufferRgba(this.world.width, this.world.height), frame: this.frames };
           if (this.showDrawBuffer) this.gs.displaySourceTbp = this.background.fbp * 32;
+          const drawStart = performance.now();
           this.world.drawDisplay(this.view(), this.gs.reg.get(0x18) ?? 0n, matrices);
+          if (this.timing) this.timing.world += performance.now() - drawStart;
           // The world's depth in GS units, written into the Z buffer where the next frame's draw
           // list reaches its world (below), so the game's 3D effects are hidden behind terrain.
           if (this.depthTest !== false) {
@@ -251,6 +259,12 @@ export class BootRuntime {
 
   vsync() {
     this.frames += 1;
+    // Per-frame timing for the page's performance overlay (P): wall time between frames, time in
+    // the GS rasterizer and in the WebGL world; the rest is the game's own code and the page.
+    if (this.timing) {
+      const now = performance.now(), t = this.timing;
+      t.frames += 1; t.period += now - (t.last ?? now); t.last = now;
+    }
     this.onFrame(this);
     if (this.trace) { this.traces = [...(this.traces ?? []).slice(-3), this.trace.filter(Boolean).join('').replace(/D+/g, (m) => `D${m.length}`).replace(/M+/g, (m) => `M${m.length}`)]; this.trace = []; }
     this.gs.phase = 'before-world';
@@ -352,18 +366,36 @@ export class BootRuntime {
     if (channel === 0x1000A000) { this.gs.gif(readChain(this.bytes(), chain, { tte: false })); return; }
     for (const record of parseVif(readChain(this.bytes(), chain))) {
       if (this.trace) this.trace.push(record.name === 'DIRECT' || record.name === 'DIRECTHL' ? 'D' : /^MSC/.test(record.name) ? 'M' : '');
-      // Layering (gameplay): each frame the game sends its whole draw list before its world pass:
-      // the sky's GIF packets, then the first VU1 program start (where the world's geometry goes
-      // on the console), then everything drawn over the world (effects, HUD). The page's sky
-      // layer is the frame buffer at that first VU1 start, so what follows stays in front.
-      if (/^MSC/.test(record.name) && this.world && this.program !== 'boot' && this.skyMarkFrame !== this.frames) {
+      // Layering (gameplay): each frame the game sends its whole draw list before its world pass.
+      // Traced on Veldin in five views: GIF packets, a VU1 program start, more GIF packets (their
+      // number follows how much sky is in view: the sky's further layers), a second VU1 start,
+      // then everything drawn over the world (effects, HUD). The page's sky layer is the frame
+      // buffer at that second VU1 start, so what follows stays in front of the world.
+      if (/^MSC/.test(record.name)) {
+        if (this.vu1StartFrame !== this.frames) { this.vu1StartFrame = this.frames; this.vu1Starts = 0; }
+        this.vu1Starts += 1;
+      }
+      if (/^MSC/.test(record.name) && this.vu1Starts === 2 && this.world && this.program !== 'boot' && this.skyMarkFrame !== this.frames) {
         this.skyMarkFrame = this.frames;
-        this.skyLayer = { ...this.gs.frameBufferRgba(this.world.width, this.world.height), frame: this.frames };
-        this.gs.afterSky = true;
-        if (this.worldDepth && this.frames - this.worldDepth.frame <= 4) this.gs.blitZ(this.worldDepth.packed, this.world.width, this.world.height);
+        // The sky continues past this start with a few more layers (3D, Z test ALWAYS, no Z write;
+        // gs-renderer.mjs skyPrimitive): the sky layer is taken just before the first primitive
+        // after them that is not sky, so those layers stay behind the world without any depth
+        // test (a depth test against the world's read-back depth lags a frame or two when the
+        // camera turns).
+        this.gs.skyPending = true;
+        this.gs.onSkyDone = () => this.finishSkyLayer();
       }
       if (record.name === 'DIRECT' || record.name === 'DIRECTHL') this.gs.gif(record.data);
     }
+  }
+
+  // The sky layer for this frame (above): the frame buffer as it stands, then the world's depth
+  // into the Z buffer so the game's later 3D drawing (effects) hides behind the world.
+  finishSkyLayer() {
+    this.gs.skyPending = false;
+    this.skyLayer = { ...this.gs.frameBufferRgba(this.world.width, this.world.height), frame: this.frames };
+    this.gs.afterSky = true;
+    if (this.worldDepth && this.frames - this.worldDepth.frame <= 4) this.gs.blitZ(this.worldDepth.packed, this.world.width, this.world.height);
   }
 
   // The displayed picture: DISPFB2 (else DISPFB1) as the game set it.
