@@ -30,6 +30,8 @@ import { readMobyAnimationRig } from './moby-animation.mjs';
 import { readMobyTextures } from './terrain-geometry.mjs';
 
 // Level 0 addresses of the executable's camera blocks (build/spike/exe-data-l00.json).
+// occl_visibility (D_00193FC0) in level 0's memory: 128 bytes, one per occlusion group.
+const OCCLUSION_TABLE = 0x173D00;
 export const VELDIN_CAMERA = Object.freeze({ viewBlock: 0x166C80, screenBlock: 0x16CA40, g: 0x160BE0, b: 0x160BF0 });
 // The level's moby table: [D_L00_0015FFD8, D_L00_0015FFDC), 0x100-byte records.
 export const VELDIN_MOBYS = Object.freeze({ begin: 0x15FFD8, end: 0x15FFDC, stride: 0x100 });
@@ -148,15 +150,36 @@ export class WorldRenderer {
     this.mobyClasses ??= new Map();
     this.mobyInstances ??= new Map();
     this.mobyGroup ??= (() => { const g = new THREE.Group(); this.scene.add(g); return g; })();
-    const begin = view.getUint32(VELDIN_MOBYS.begin, true), end = view.getUint32(VELDIN_MOBYS.end, true);
-    if (!begin || end <= begin || end - begin > 0x100000) return;
+    // The moby list ends at the first moby whose state is 0xFF, as the game's draw pass walks it
+    // (moby_proc 0x212518; dead mobys are 0xFE and skipped). The pointer at VELDIN_MOBYS.end only
+    // covers the mobys placed with the level: those created later (the wrench in the hero's
+    // hand, thrown bombs, spawned enemies) come after it.
+    const begin = view.getUint32(VELDIN_MOBYS.begin, true);
+    if (!begin) return;
+    const end = begin + 0x100 * 2048;
     const seen = new Set();
+    // Why the hero (class 0) is or is not drawn this frame, for the page's reports.
+    this.heroStatus = 'not in the moby table';
     for (let m = begin; m < end; m += VELDIN_MOBYS.stride) {
-      if (view.getInt8(m + 0x20) < 0) continue;
+      if (view.getUint8(m + 0x20) === 0xFF) break;
+      // The gameplay hero is the first class-0 moby (slot 0); cutscenes add their own copy later.
+      const hero = m === begin && view.getInt16(m + 0xA6, true) === 0;
+      if (view.getInt8(m + 0x20) < 0) { if (hero) this.heroStatus = `state ${view.getInt8(m + 0x20)}`; continue; }
       const classId = view.getInt16(m + 0xA6, true);
       if (classId < 0) continue;
-      const cls = this.mobyClass(classId);
-      if (!cls) continue;
+      // The game's own draw pass (moby_proc, 0x211808, at 0x211b70-0x211bd8) skips a moby whose
+      // flags (+0x34) have 0x01 or 0x80 set (hidden: bolts inside unbroken crates, among others),
+      // and one its occlusion test rejects: occl_visibility[+0x37] & +0x36 == 0, the table being
+      // the camera's current zone (D_00193FC0, level 0 0x173d00, built by update_occlusion).
+      const flags = view.getUint16(m + 0x34, true);
+      if (flags & 0x81) { if (hero) this.heroStatus = `hidden by the game (flags 0x${flags.toString(16)})`; continue; }
+      if ((view.getUint8(OCCLUSION_TABLE + (view.getUint8(m + 0x37) & 127)) & view.getUint8(m + 0x36)) === 0) {
+        if (hero) this.heroStatus = 'occluded by the game';
+        continue;
+      }
+      const cls = this.mobyClass(classId, view, m);
+      if (!cls) { if (hero) this.heroStatus = 'class model not decoded'; continue; }
+      if (hero) this.heroStatus = 'drawn';
       const key = `${m}:${classId}`;
       let inst = this.mobyInstances.get(key);
       if (!inst) { inst = this.makeMobyInstance(cls); this.mobyInstances.set(key, inst); this.mobyGroup.add(inst.group); }
@@ -173,7 +196,11 @@ export class WorldRenderer {
       world.multiply(new THREE.Matrix4().makeScale(ratio, ratio, ratio));
       if (!inst.bones) { inst.group.matrix.copy(world); continue; }
       const joints = matrices.count(m);
-      if (joints !== inst.bones.length) { inst.group.visible = false; continue; }
+      if (joints !== inst.bones.length) {
+        inst.group.visible = false;
+        if (hero) this.heroStatus = `joint count ${joints} (pose code) vs ${inst.bones.length} (model); class header 0x${view.getUint32(m + 0x24, true).toString(16)}`;
+        continue;
+      }
       const k = cls.scale / 1024;
       for (let j = 0; j < joints; j++) {
         const r = matrices.matrix(j);
@@ -188,13 +215,74 @@ export class WorldRenderer {
     for (const [key, inst] of this.mobyInstances) if (!seen.has(key)) inst.group.visible = false;
   }
 
-  mobyClass(classId) {
+  // A class the level file lists without model data (gadgets such as the wrench, item 8, class
+  // 71) is loaded by the game at run time (select_world_object_resource_tables) and read here
+  // from memory: the class header at moby + 0x24. In memory the game has turned its offsets into
+  // addresses: the header words at +0x00, +0x10, +0x14, +0x18, +0x1C, +0x20, +0x28 and, in each
+  // 16-byte draw packet record, the words at +0 and +8 (found by comparing the hero's class in
+  // memory with its copy in the level file: 208 words, all address = offset + class address).
+  // They are turned back into offsets in a copy, which the level-file decoders then read as a
+  // one-class planet; the texture list stays the level header's entry for the class.
+  memoryPlanet(classId, view, address) {
+    // Preferred: the class as the level stores it. A gadget class is one of the level's
+    // compressed class resources (class_resource_ids, compressed_class_resources and
+    // class_material_maps: level 0 0x1afbc0 / 0x1afc20 / 0x1afce0, 0x18 entries), which
+    // select_world_object_resource_tables decompresses and prepare_resident_class_render_data
+    // then patches in place (addresses, GS texture registers). The decompressed copy is the file
+    // form, and its 16-byte material map stands for the level header's texture list.
+    if (this.decompressCopy) {
+      for (let i = 0; i < 0x18; i++) {
+        if (view.getInt32(0x1AFBC0 + 4 * i, true) !== classId) continue;
+        const data = this.decompressCopy(view.getUint32(0x1AFC20 + 4 * i, true));
+        if (!data) break;
+        const PAD = 16, core = new Uint8Array(PAD + data.length);
+        core.set(data, PAD);
+        const header = new Uint8Array(64), hv = new DataView(header.buffer);
+        hv.setUint32(24, 1, true); hv.setUint32(28, 32, true); hv.setUint32(32, PAD, true); hv.setUint32(36, classId, true);
+        header.set(new Uint8Array(view.buffer, view.byteOffset + 0x1AFCE0 + 16 * i, 16), 48);
+        return { ...this.planet, header, core };
+      }
+    }
+    const entryTextures = (() => {
+      const h = this.planet.header, hv = new DataView(h.buffer, h.byteOffset, h.byteLength);
+      const n = hv.getUint32(24, true), t = hv.getUint32(28, true);
+      for (let i = 0; i < n; i++) if (hv.getUint32(t + i * 32 + 4, true) === classId) return h.slice(t + i * 32 + 16, t + i * 32 + 32);
+      return null;
+    })();
+    if (!entryTextures || !address || address >= view.byteLength) return null;
+    const PAD = 16, SIZE = Math.min(0x80000, view.byteLength - address);
+    const core = new Uint8Array(PAD + SIZE);
+    core.set(new Uint8Array(view.buffer, view.byteOffset + address, SIZE), PAD);
+    const cv = new DataView(core.buffer);
+    const unrelocate = (at) => {
+      const value = cv.getUint32(PAD + at, true);
+      if (value >= address && value < address + SIZE) cv.setUint32(PAD + at, value - address + PAD, true);
+    };
+    for (const at of [0x00, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x28]) unrelocate(at);
+    const packets = cv.getUint32(PAD, true) - PAD;
+    const records = cv.getUint8(PAD + 4) + cv.getUint8(PAD + 5) + cv.getUint8(PAD + 6);
+    for (let r = 0; r < records && packets + 16 * r + 12 <= SIZE; r++) { unrelocate(packets + 16 * r); unrelocate(packets + 16 * r + 8); }
+    const header = new Uint8Array(32 + 32);
+    const hv = new DataView(header.buffer);
+    hv.setUint32(24, 1, true); hv.setUint32(28, 32, true);
+    hv.setUint32(32, PAD, true); hv.setUint32(36, classId, true);
+    header.set(entryTextures, 48);
+    return { ...this.planet, header, core };
+  }
+
+  mobyClass(classId, view = null, moby = 0) {
     if (this.mobyClasses.has(classId)) return this.mobyClasses.get(classId);
     let cls;
     try {
-      const model = readMobyGeometry(this.planet, classId);
+      let source = this.planet, model;
+      try { model = readMobyGeometry(source, classId); } catch (error) {
+        if (!view || !moby || !/no planet model data/.test(error.message)) throw error;
+        source = this.memoryPlanet(classId, view, view.getUint32(moby + 0x24, true));
+        if (!source) throw error;
+        model = readMobyGeometry(source, classId);
+      }
       let rig = null;
-      try { rig = readMobyAnimationRig(this.planet, classId); } catch { rig = null; }
+      try { rig = readMobyAnimationRig(source, classId); } catch { rig = null; }
       const batches = model.batches.filter((b) => b.material !== UNTEXTURED_MATERIAL && this.mobyImages[model.textures[b.material]]);
       cls = { model, rig, scale: model.scale, batches, materials: new Map() };
     } catch { cls = null; }

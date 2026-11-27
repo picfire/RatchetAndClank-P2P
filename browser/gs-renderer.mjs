@@ -360,7 +360,11 @@ export class GsRenderer {
     const psm = bits(tex0, 20, 6);
     return {
       tex0, tbp: bits(tex0, 0, 14), tbw: bits(tex0, 14, 6), psm,
-      tw: 1 << bits(tex0, 26, 4), th: 1 << bits(tex0, 30, 4), tcc: bits(tex0, 34, 1), tfx: bits(tex0, 35, 2),
+      // TW / TH above 10 are out of the GS's range (textures are at most 1024 x 1024); taken as 10.
+      // The game's smoke strips set TH = 14 with T running 0..1, which the 16384-row height
+      // wrapped into unrelated memory (the crash site's shimmering sheets); 1024 rows is the strip.
+      // ASSUMED from the register range; how the console treats values above 10 is not measured.
+      tw: 1 << Math.min(10, bits(tex0, 26, 4)), th: 1 << Math.min(10, bits(tex0, 30, 4)), tcc: bits(tex0, 34, 1), tfx: bits(tex0, 35, 2),
       indexed: psm === PSM.T8 || psm === PSM.T4 || psm === PSM.T8H || psm === PSM.T4HL || psm === PSM.T4HH,
       wms: bits(clamp, 0, 2), wmt: bits(clamp, 2, 2), minu: bits(clamp, 4, 10), maxu: bits(clamp, 14, 10),
       minv: bits(clamp, 24, 10), maxv: bits(clamp, 34, 10), ta0: bits(this.reg.get(0x3B) ?? 0n, 0, 8),
@@ -500,7 +504,7 @@ export class GsRenderer {
       const xs = vs.map((v) => v.x), ys = vs.map((v) => v.y), [px, py] = this.probePoint;
       if (Math.min(...xs) <= px && px <= Math.max(...xs) && Math.min(...ys) <= py && py <= Math.max(...ys)) {
         const t = s.texture;
-        const key = `type ${type} tex ${t ? `${t.psm.toString(16)}@${t.tbp.toString(16)}` : 'none'} zte ${s.zte} ztst ${s.ztst} zmsk ${s.zmsk} abe ${s.abe} fst ${s.fst} z ${Math.round(vs[0].z)} q ${(+vs[0].q).toFixed(3)}`;
+        const key = `type ${type} tex ${t ? `${t.psm.toString(16)}@${t.tbp.toString(16)} ${t.tw}x${t.th} tcc ${t.tcc} tfx ${t.tfx} mmag ${t.mmag} mmin ${t.mminLinear} lcm ${t.lcm} lodL ${t.lodL} lodK ${(+t.lodK).toFixed(2)} wms ${t.wms} wmt ${t.wmt} minu ${t.minu} maxu ${t.maxu} minv ${t.minv} maxv ${t.maxv}` : 'none'} zte ${s.zte} ztst ${s.ztst} zmsk ${s.zmsk} abe ${s.abe} blend ${s.asel}${s.bsel}${s.csel}${s.dsel} fix ${s.fix} ate ${s.ate} atst ${s.atst} aref ${s.aref} fst ${s.fst} rgba ${[vs[0].r, vs[0].g, vs[0].b, vs[0].a].map((x) => Math.round(x)).join(',')} st ${(+vs[0].s).toFixed(2)},${(+vs[0].t).toFixed(2)} q ${(+vs[0].q).toFixed(3)} uspan ${(t ? t.tw : 1) * (Math.max(...vs.map((v) => v.s / (v.q || 1))) - Math.min(...vs.map((v) => v.s / (v.q || 1)))).toFixed(1)} vrange ${vs.map((v) => ((t ? t.th : 1) * v.t / (v.q || 1)).toFixed(1)).join('/')}`;
         this.probeHits.set(key, (this.probeHits.get(key) ?? 0) + 1);
       }
     }

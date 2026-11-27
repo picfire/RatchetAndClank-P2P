@@ -114,7 +114,9 @@ export function readTerrainGeometry(planet) {
         if (colour + 4 > planet.core.length) throw new Error('Terrain vertex colour is out of range.');
         batch.positions.push(...position);
         batch.uvs.push(...info.uv);
-        batch.colours.push(...[0, 1, 2].map(channel => Math.min(planet.core[colour + channel] / 128, 1)));
+        // Baked terrain lighting: the GS modulates texture by vertex colour with 0x80 = 1.0, so a
+        // colour above 0x80 brightens (the result clamped per channel on output).
+        batch.colours.push(...[0, 1, 2].map(channel => planet.core[colour + channel] / 128));
       }
     }
     for (let offset = stripArray.offset; offset < stripArray.offset + stripArray.length; offset += 4) {

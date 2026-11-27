@@ -234,6 +234,40 @@ export function onHandover(context, level) {
 }
 
 export function report(context) {
+  if (process.env.HERO_ITEMS) {
+    const v = context.view(), hero = 0x13F350;
+    console.log(`moby table: begin 0x${v.getUint32(0x15FFD8, true).toString(16)} end 0x${v.getUint32(0x15FFDC, true).toString(16)} words around: ${[0x15FFD0, 0x15FFD4, 0x15FFD8, 0x15FFDC, 0x15FFE0, 0x15FFE4, 0x15FFE8].map((a) => '0x' + a.toString(16) + '=' + v.getUint32(a, true).toString(16)).join(' ')}`);
+    for (let i = 0; i < 7; i++) {
+      const at = hero + 0x1090 + i * 0x50, moby = v.getUint32(at, true);
+      const info = moby ? `class ${v.getInt16(moby + 0xA6, true)} state ${v.getInt8(moby + 0x20)} flags 0x${v.getUint16(moby + 0x34, true).toString(16)} occl ${v.getUint8(moby + 0x36)}/${v.getUint8(moby + 0x37)} pos ${[0x10, 0x14, 0x18].map((o) => v.getFloat32(moby + o, true).toFixed(1))}` : '';
+      console.log(`hero item slot ${i}: moby 0x${moby.toString(16)} moby2 0x${v.getUint32(at + 4, true).toString(16)} ${info} words ${[0x20, 0x24, 0x28, 0x2c].map((o) => v.getInt32(at + o, true)).join(' ')}`);
+    }
+  }
+  if (process.env.MOBY_NEAR) {
+    const v = context.view(), f = (a) => +v.getFloat32(a, true).toFixed(2); const b = v.getUint32(0x15FFD8, true), e = v.getUint32(0x15FFDC, true);
+    let hx = 0, hy = 0, hz = 0;
+    for (let m = b; m < e; m += 0x100) if (v.getInt16(m + 0xA6, true) === 0) { hx = f(m + 0x10); hy = f(m + 0x14); hz = f(m + 0x18); break; }
+    for (let m = b; m < b + 0x100 * 2048; m += 0x100) {
+      if (v.getUint8(m + 0x20) === 0xFF) break;
+      const d = Math.hypot(f(m + 0x10) - hx, f(m + 0x14) - hy, f(m + 0x18) - hz);
+      if (d > 12) continue;
+      console.log(`near hero: slot ${(m - b) / 256} class ${v.getInt16(m + 0xA6, true)} state ${v.getInt8(m + 0x20)} flags 0x${v.getUint16(m + 0x34, true).toString(16)} occl ${v.getUint8(m + 0x36)}/${v.getUint8(m + 0x37)} d ${d.toFixed(2)} pos ${f(m + 0x10)},${f(m + 0x14)},${f(m + 0x18)} scale ${f(m + 0x2c)} pclass 0x${v.getUint32(m + 0x24, true).toString(16)}`);
+    }
+  }
+  if (process.env.MOBY_CULL) {
+    const v = context.view(); const b = v.getUint32(0x15FFD8, true), e = v.getUint32(0x15FFDC, true);
+    const table = Array.from({ length: 128 }, (_, i) => v.getUint8(0x173D00 + i));
+    let live = 0, flagged = 0, occluded = 0; const byClass = {};
+    for (let m = b; m < e; m += 0x100) {
+      if (v.getInt8(m + 0x20) < 0) continue; live++;
+      const cls = v.getInt16(m + 0xA6, true), fl = v.getUint16(m + 0x34, true);
+      const occ = (table[v.getUint8(m + 0x37) & 127] & v.getUint8(m + 0x36)) === 0;
+      if (fl & 0x81) flagged++; else if (occ) occluded++;
+      const k = byClass[cls] ??= { n: 0, flagged: 0, occluded: 0 }; k.n++; if (fl & 0x81) k.flagged++; else if (occ) k.occluded++;
+    }
+    console.log(`moby culling: live ${live}, hidden by flags 0x81 ${flagged}, occluded ${occluded}; table nonzero ${table.filter(Boolean).length}/128`);
+    console.log('by class (hidden ones):', JSON.stringify(Object.entries(byClass).filter(([, k]) => k.flagged || k.occluded).slice(0, 30)));
+  }
   if (process.env.MOBY_DUMP) {
     const v = context.view(), f = (a) => +v.getFloat32(a, true).toFixed(2);
     const b = v.getUint32(0x15FFD8, true), e = v.getUint32(0x15FFDC, true); let shown = 0;

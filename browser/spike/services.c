@@ -281,10 +281,24 @@ s32 spike_spr_transfers(void) { return spr_transfers; }
    "still playing" forever and the help message waiting on it never finished. Other commands
    answer 0. */
 static struct { s32 live; s32 start; s32 samples; s32 rate; } vag_streams[64];
+/* The page plays the streams (boot-runtime.mjs): the request as sent, and stop / pause / continue
+   by handle (-1: every stream). The Node runner ignores them. */
+extern void spike_stream_play(s32 handle, s32 location, s32 size, s32 word2, s32 word3, s32 word4)
+    __attribute__((import_module("env"), import_name("spike_stream_play")));
+extern void spike_stream_control(s32 handle, s32 action)
+    __attribute__((import_module("env"), import_name("spike_stream_control")));
 static s32 streams_without_header;
 s32 spike_streams_without_header(void) { return streams_without_header; }
 static s32 vsync_count(void);
+s32 spike_sound_command_counts[128];
+s32 spike_sound_0x11_log[64], spike_sound_0x11_log_count;
 static s32 sound_command(s32 command, const void *data, s32 size) {
+    if (command >= 0 && command < 128) spike_sound_command_counts[command]++;
+    if (command == 0x11 && size >= 12 && spike_sound_0x11_log_count < 16) {
+        const s32 *w = (const s32 *)data;
+        for (s32 k = 0; k < 4; k++) spike_sound_0x11_log[spike_sound_0x11_log_count * 4 + k] = k * 4 < size ? w[k] : 0;
+        spike_sound_0x11_log_count++;
+    }
     if (command == 0x2C && size >= 4) {
         /* A stream frees its slot when its time is up, whether or not the game asks about it
            (on the IOP a finished stream releases its voice); with every slot live, the oldest
@@ -329,7 +343,22 @@ static s32 sound_command(s32 command, const void *data, s32 size) {
                 }
             }
             stream_starts += 1;
+            if (size >= 16) {
+                const s32 *request = (const s32 *)data;
+                spike_stream_play(0x100 + i, location, request[1], request[2], request[3], size >= 20 ? request[4] : 0);
+            }
             return 0x100 + i;
+        }
+        return 0;
+    }
+    /* 0x15 snd_stop_sound { handle }, 45 / 46 snd_pause / snd_continue_vag_stream { handle },
+       0x34 snd_stop_all_streams: passed to the page's player (0 stop, 1 pause, 2 continue). */
+    if (command == 0x34) { spike_stream_control(-1, 0); return 0; }
+    if (size >= 4 && (command == 0x15 || command == 45 || command == 46)) {
+        const s32 handle = *(const s32 *)data;
+        if (handle >= 0x100 && handle < 0x100 + 64) {
+            if (command == 0x15) vag_streams[handle - 0x100].live = 0;
+            spike_stream_control(handle, command == 0x15 ? 0 : command == 45 ? 1 : 2);
         }
         return 0;
     }
@@ -338,11 +367,15 @@ static s32 sound_command(s32 command, const void *data, s32 size) {
         s32 elapsed, total;
         if (handle < 0 || handle >= 64 || !vag_streams[handle].live) return 0;
         if (command == 0x4F) return 1;
-        if (vag_streams[handle].samples < 0) return command == 0x19 ? 1 : 48000;
+        /* 0x19 (snd_sound_is_still_playing_cb) answers the handle while it plays and 0 after:
+           music_update_stream's callback (set_sound_handle_id) stores the answer as the stream's
+           handle. Answering 1 made the music's handle 1, which the next poll found dead, so the
+           game restarted the segment every few frames. */
+        if (vag_streams[handle].samples < 0) return command == 0x19 ? 0x100 + handle : 48000;
         elapsed = (vsync_count() - vag_streams[handle].start) * vag_streams[handle].rate / 60;
         total = vag_streams[handle].samples;
         if (elapsed >= total) { if (command == 0x19) vag_streams[handle].live = 0; return 0; }
-        return command == 0x19 ? 1 : (s32)((s64)(total - elapsed) * 48000 / vag_streams[handle].rate);
+        return command == 0x19 ? 0x100 + handle : (s32)((s64)(total - elapsed) * 48000 / vag_streams[handle].rate);
     }
     return 0;
 }

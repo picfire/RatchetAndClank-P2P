@@ -2966,7 +2966,7 @@ f32 jet_distance_l00(const f32 *a, const f32 *b) {
    - 0x1f2940-0x1f29b8: the cells of the moby grid (0x19b7e0, 16-unit cells, u16 moby indexes at
      +0x4000) under the sphere's box are listed. ADAPTED: the browser build does not fill that grid
      (update_entity's grid stage is not ported), so every live moby in the table
-     (level_moby_table .. moby_instance_end) is visited instead, which is a superset of those cells.
+     (level_moby_table up to the 0xFF end marker) is visited instead, which is a superset of those cells.
    - 0x1f29d0-0x1f2a5c, per moby: skip the excluded moby, one without collision data (+0x94), one
      already stamped (+0x9c); test its bounding sphere (+0x00: xyz = position * 1024, w = radius
      in the same units) against the query (position * 1024, radius * 1024): skip when
@@ -2997,8 +2997,12 @@ s32 collect_mobies_in_sphere_l00(const f32 *position, s32 mask, u8 *excluded, co
     if (*stamp < 0 || !(radius > 0.0f)) return 0;
     const s32 now = ++*stamp;
     const f32 qx = position[0] * 1024.0f, qy = position[1] * 1024.0f, qz = position[2] * 1024.0f, qr = radius * 1024.0f;
-    for (u8 *m = level_moby_table; m && m < level_moby_table_end && count < 0x7f; m += 0x100) {
-        if (m[0x20] == 0xFF || m == excluded) continue;
+    /* The list runs to the first moby whose state is 0xFF (moby_proc's end test), past
+       moby_instance_end: mobys created during play (bombs, spawned enemies) follow it. */
+    (void)level_moby_table_end;
+    for (u8 *m = level_moby_table; m && m < level_moby_table + 0x100 * 2048 && count < 0x7f; m += 0x100) {
+        if (m[0x20] == 0xFF) break;
+        if ((s8)m[0x20] < 0 || m == excluded) continue;
         if (!*(u32 *)(m + 0x94) || *(s32 *)(m + 0x9c) == now) continue;
         const f32 *bs = (const f32 *)m;
         const f32 dx = bs[0] - qx, dy = bs[1] - qy, dz = bs[2] - qz, r = qr + bs[3];

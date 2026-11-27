@@ -83,6 +83,8 @@ for (const { module: from, name: symbol, kind } of WebAssembly.Module.imports(mo
     };
   } else if (symbol === 'spike_debug_print') { // the game's own printf (debug text)
     imports[from][symbol] = (address) => { const text = context.cString(address).replace(/\n$/, ''); if (debugLines++ < 40) console.log(`game printf: ${text}`); };
+  } else if (symbol === 'spike_stream_play' || symbol === 'spike_stream_control') {
+    imports[from][symbol] = () => {};
   } else if (symbol === 'spike_note_bad_segment') {
     imports[from][symbol] = () => {};
   } else if (symbol === 'spike_pad_buttons') { // the controller (services.c scePad2Read): --pad script

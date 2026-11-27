@@ -27,6 +27,29 @@ import { parseVif, readChain } from './spike/display-list.mjs';
 
 const ASYNCIFY_DATA = 0x90000, ASYNCIFY_END = 0xE0000;
 const SECTOR_BYTES = 2048;
+// PS2 SPU ADPCM, one channel, continuing from `history` (the last two samples) so consecutive
+// chunks of one stream decode as one. Same filter table as ps2-adpcm.mjs; a block whose flags
+// byte has bit 0 set (end) ends the data.
+const ADPCM_F0 = [0, 60, 115, 98, 122], ADPCM_F1 = [0, 0, -52, -55, -60];
+function decodeAdpcmChunk(data, history) {
+  const blocks = Math.floor(data.length / 16), out = new Float32Array(blocks * 28);
+  let n = 0;
+  for (let b = 0; b < blocks; b++) {
+    const at = b * 16, predictor = Math.min(data[at] >> 4, 4), shift = data[at] & 15;
+    for (let i = 0; i < 28; i++) {
+      const byte = data[at + 2 + (i >> 1)];
+      let nibble = (i & 1 ? byte >> 4 : byte & 15) << 12;
+      if (nibble & 0x8000) nibble -= 0x10000;
+      let v = (nibble >> shift) + ((history[0] * ADPCM_F0[predictor] + history[1] * ADPCM_F1[predictor]) >> 6);
+      v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+      history[1] = history[0]; history[0] = v;
+      out[n++] = v / 32768;
+    }
+    if (data[at + 1] & 1) break;
+  }
+  return out.subarray(0, n);
+}
+
 const MAIN = 'FUN_0012d9d8'; // run_game_main_loop, what crt0 calls
 // Level programs built for the browser: entry address (the first chunk id parse_bin returns,
 // config/us/overlays/level_NN/manifest.json entry_point) -> module and entry symbol.
@@ -145,6 +168,15 @@ export class BootRuntime {
       case 'spike_debug_print': return (at) => this.log(`game: ${this.cString(at).replace(/\n$/, '')}`);
       case 'spike_deferred': return (nameAt) => { const key = this.cString(nameAt); this.deferred.set(key, (this.deferred.get(key) ?? 0) + 1); };
       case 'spike_unimplemented_rpc': return (server, fn) => { throw new Error(`IOP RPC server 0x${(server >>> 0).toString(16)} is not implemented (function ${fn})`); };
+      case 'spike_stream_play': return (handle, location, size, word2, word3, word4) => {
+        if ((this.streamLog ??= []).length < 40) this.streamLog.push({ frame: this.frames, handle: handle.toString(16), location, size, w2: (word2 >>> 0).toString(16), w3: (word3 >>> 0).toString(16), w4: (word4 >>> 0).toString(16) });
+        // snd_play_vag_stream_by_loc_ex_cb's payload: word 2 = (volume << 16) | left, word 3 =
+        // (flags << 16) | right. The music and dialogue calls (music_start_track_*) pass the track
+        // volume (0x400 = full) in the argument the recovered C names "pitch", and 0 / 0 for left /
+        // right (no pan).
+        this.playStream(handle, location, size, (word2 >>> 16) & 0xFFFF, word2 & 0xFFFF, word3 & 0xFFFF);
+      };
+      case 'spike_stream_control': return (handle, action) => { this.controlStream(handle, action); };
       case 'spike_note_bad_segment': return (start, end) => {
         const v = this.view(), f = (a) => v.getFloat32(a, true);
         const frames = (new Error().stack ?? '').split('\n').map((l) => l.match(/at (?:\w+\.wasm\.)?([\w.$]+) \(.*wasm-function/)?.[1]).filter(Boolean).slice(1, 8);
@@ -170,6 +202,7 @@ export class BootRuntime {
           this.background = { ...this.gs.frameBufferRgba(this.world.width, this.world.height), frame: this.frames };
           if (this.showDrawBuffer) this.gs.displaySourceTbp = this.background.fbp * 32;
           const drawStart = performance.now();
+          this.world.decompressCopy ??= (address) => this.decompressCopy(address);
           this.world.drawDisplay(this.view(), this.gs.reg.get(0x18) ?? 0n, matrices);
           if (this.timing) this.timing.world += performance.now() - drawStart;
           // The world's depth in GS units, written into the Z buffer where the next frame's draw
@@ -352,6 +385,20 @@ export class BootRuntime {
     return size;
   }
 
+  // A WAD stream in game memory, decompressed into a fresh array (game memory is not written);
+  // the world renderer uses it for gadget classes (compressed_class_resources).
+  decompressCopy(source) {
+    const bytes = this.bytes(), d = this.decoder;
+    if (bytes[source] !== 0x57 || bytes[source + 1] !== 0x41 || bytes[source + 2] !== 0x44) return null;
+    const length = this.view().getUint32(source + 3, true);
+    d.wad_reset();
+    new Uint8Array(d.memory.buffer, d.wad_input_address(), length).set(bytes.subarray(source, source + length));
+    const size = d.wad_decode(length, d.wad_output_capacity());
+    const out = size > 0 && d.wad_ready() === 1 ? new Uint8Array(d.memory.buffer, d.wad_output_address(), size).slice() : null;
+    d.wad_reset();
+    return out;
+  }
+
   gsLoadImage(dbp, dbw, psm, x, y, w, h, source) {
     const bpp = { 0: 32, 1: 24, 2: 16, 10: 16, 19: 8, 20: 4, 27: 8, 36: 4, 44: 4 }[psm] ?? 32;
     const gs = this.gs;
@@ -389,6 +436,82 @@ export class BootRuntime {
     }
   }
 
+  // The game's VAG streams (989snd command 0x2C: music tracks, voice lines), played from the disc.
+  // A stream is a VAGp file at the disc sector `location` (big-endian data size at +0x0C, sample
+  // rate at +0x10, data from +0x30), or headerless PS2 ADPCM of `size` bytes whose rate is the
+  // rate is ASSUMED to be 48 kHz. Mono, at the request's volume (see spike_stream_play). Decoded in chunks of about two seconds, each queued right after the last, so a long
+  // track starts at once and never stalls the game.
+  async playStream(handle, location, size, volume, left, right) {
+    const ctx = this.audioContext;
+    if (!ctx || location <= 0) return;
+    this.controlStream(handle, 0);
+    const stream = { stopped: false, paused: false, sources: new Set(), gainL: ctx.createGain(), gainR: ctx.createGain(), merger: ctx.createChannelMerger(2) };
+    (this.streams ??= new Map()).set(handle, stream);
+    // Volume 0x400 = full; left / right pan when either is set (0x3FFF full), else centred.
+    const master = Math.min(1, Math.max(0, volume / 0x400)) * 0.8;
+    const pan = (v) => Math.min(1, Math.max(0, (v & 0x7FFF) / 0x3FFF));
+    const panned = left || right;
+    stream.gainL.gain.value = master * (panned ? pan(left) : 1);
+    stream.gainR.gain.value = master * (panned ? pan(right) : 1);
+    stream.gainL.connect(stream.merger, 0, 0); stream.gainR.connect(stream.merger, 0, 1); stream.merger.connect(ctx.destination);
+    const SECTOR = 2048;
+    const first = await this.reader.readSectors(location, 1);
+    let bytes = size, rate = 48000, offset = 0; // a stream without a VAGp header: ASSUMED 48 kHz
+    if (first[0] === 0x56 && first[1] === 0x41 && first[2] === 0x47 && first[3] === 0x70) {
+      const be = (o) => ((first[o] << 24) | (first[o + 1] << 16) | (first[o + 2] << 8) | first[o + 3]) >>> 0;
+      bytes = be(12); offset = 0x30;
+      const headerRate = be(16);
+      if (headerRate >= 8000 && headerRate <= 96000) rate = headerRate;
+    }
+    if (!(bytes > 0) || !(rate >= 4000 && rate <= 96000)) return;
+    const history = [0, 0];
+    let at = 0, when = ctx.currentTime + 0.05;
+    const CHUNK = 16 * 28 * 128 * 4; // bytes of ADPCM per piece (about 2 s at 48 kHz)
+    while (at < bytes && !stream.stopped) {
+      const take = Math.min(CHUNK, bytes - at);
+      const startSector = location + Math.floor((offset + at) / SECTOR), skip = (offset + at) % SECTOR;
+      const raw = await this.reader.readSectors(startSector, Math.ceil((skip + take) / SECTOR));
+      if (stream.stopped) break;
+      const samples = decodeAdpcmChunk(raw.subarray(skip, skip + take), history);
+      at += take;
+      if (!samples.length) break;
+      const buffer = ctx.createBuffer(1, samples.length, rate);
+      buffer.copyToChannel(samples, 0);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(stream.gainL); source.connect(stream.gainR);
+      when = Math.max(when, ctx.currentTime + 0.02);
+      source.start(when);
+      when += buffer.duration;
+      stream.sources.add(source);
+      source.onended = () => stream.sources.delete(source);
+      // Keep about four seconds decoded ahead of the playhead.
+      while (!stream.stopped && when - ctx.currentTime > 4) await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  controlStream(handle, action) {
+    const ctx = this.audioContext;
+    if (!this.streams || !ctx) return;
+    const targets = handle === -1 ? [...this.streams.keys()] : [handle];
+    for (const h of targets) {
+      const stream = this.streams.get(h);
+      if (!stream) continue;
+      if (action === 0) {
+        stream.stopped = true;
+        for (const source of stream.sources) { try { source.stop(); } catch { /* already ended */ } }
+        stream.merger.disconnect();
+        this.streams.delete(h);
+      } else {
+        // pause / continue: silence and restore (the IOP holds the stream's position; here the
+        // queued audio keeps running underneath, which only matters for long pauses)
+        const on = action === 2;
+        stream.merger.disconnect();
+        if (on) stream.merger.connect(ctx.destination);
+      }
+    }
+  }
+
   // The sky layer for this frame (above): the frame buffer as it stands, then the world's depth
   // into the Z buffer so the game's later 3D drawing (effects) hides behind the world.
   finishSkyLayer() {
@@ -403,7 +526,7 @@ export class BootRuntime {
     // In gameplay with showDrawBuffer the display copy is skipped (gs-renderer.mjs): the picture is
     // the draw buffer the world pass drew into, at the same size and place as the background.
     const bg = this.background;
-    if (this.showDrawBuffer && bg && this.frames - bg.frame <= 2) return this.gs.framebuffer(bg.dispfb, width, height);
+    if (this.showDrawBuffer && bg && this.frames - bg.frame <= 20) return this.gs.framebuffer(bg.dispfb, width, height);
     this.gs.displaySourceTbp = undefined;
     const v = this.view();
     const dispfb = v.getBigUint64(0x12000090, true) || v.getBigUint64(0x12000070, true);

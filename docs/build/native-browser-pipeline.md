@@ -1310,6 +1310,88 @@ once the game could find objects.
 - **Level 0x1fde98** (VU1 point-batch packet builder; ocean, thruster flame) is ported. Its packet
   is built as on the console and not drawn (no VU1 microcode).
 
+### Twelfth pass, music and voice (2026-11-25)
+
+- **VAG streams play.**
+  - Command 0x2C passes its request to the page (`spike_stream_play`); 0x15 stop, 0x34 stop
+    all, 45 pause and 46 continue pass to `spike_stream_control`.
+  - The page reads the VAGp file from the disc (big-endian size at +0x0C, rate at +0x10, data
+    at +0x30). It decodes PS2 ADPCM in two-second chunks, with the filter state carried across
+    chunks, and queues them in Web Audio.
+  - Volume: word 2's high half. The music and dialogue calls pass the track volume (0x400 =
+    full) in the argument the recovered C names "pitch"; left/right pan is 0/0 (centred).
+  - Checked by decoding: a Veldin music track (sector 1544485, 44.1 kHz, 122.9 s, RMS 7739) and
+    a voice line ("speech4", 13.9 s).
+- **Still playing (0x19)** now answers the handle, not 1. `music_update_stream` stores the
+  answer as the stream's handle (`set_sound_handle_id`). With 1, the next poll found no stream,
+  and the music restarted every 4 frames: 397 starts in 3,300 frames, now 3.
+- **Not done:** sound effects. Command 0x11, about 3,600 per run, plays sounds from banks 0x12
+  and 0x13. The banks are not loaded (`snd_bank_load_from_ee_cb` is deferred).
+- **Reports:** the page also reports the hero staying undrawn for 30 frames (with the reason:
+  moby state, model not decoded, or joint count against the model's), and the 3D layer
+  switching off in a level.
+
+### Twelfth pass, what the game draws (2026-11-25)
+
+The game's moby draw pass (`moby_proc`, 0x211808, still assembly) decides what is drawn. The
+page now follows the parts of it that were read:
+- **End of the list.** The loop stops at the first moby whose state is 0xFF (0x212518); 0xFE
+  (dead) is skipped. `D_L00_0015FFDC` ends only the mobys placed with the level. Those created
+  in play come after it, among them the item in the hero's hand (slot 306 against 296), bombs
+  and spawned enemies. The renderer and the `collect_mobies_in_sphere` port now walk to the
+  0xFF marker.
+- **Hidden and occluded** (0x211b70-0x211bd8). The pass skips:
+  - a moby whose flags (+0x34) have 0x01 or 0x80 set;
+  - one with `occl_visibility[+0x37] & +0x36` zero (level 0 table 0x173d00, built by
+    `update_occlusion`).
+  - Measured at frame 2900: of 296 live mobys, 39 are hidden by flags (26 of the 29 bolts,
+    which sit inside unbroken crates) and 51 are occluded. All were drawn before.
+- **Gadget models.** The wrench (item 8, class 71) has no model data in the level header. It is
+  one of the level's compressed class resources (`class_resource_ids` /
+  `compressed_class_resources` / `class_material_maps`, level 0 0x1afbc0 / 0x1afc20 / 0x1afce0),
+  which `select_world_object_resource_tables` decompresses and
+  `prepare_resident_class_render_data` patches in place. The renderer decompresses its own copy
+  (`BootRuntime.decompressCopy`) and decodes it as a one-class planet, with the material map as
+  the texture list. Checked by screenshot: the wrench is in Ratchet's hand.
+- **Terrain colours** are no longer capped at 1.0 (the GS modulates with 0x80 = 1.0 and
+  brightens above it).
+  - Veldin's terrain colours average 0.33 (most between 0x20 and 0x40). Doubling them was tried
+    and barely changed the view, so it was not kept.
+  - The darker, less sandy look against the original is not explained yet. Candidates: fog (not
+    implemented), unlit ties and shrubs, unlit mobys.
+
+### Twelfth pass, cutscene and effects (2026-11-26)
+
+- **Camera type 4** (`call_indirect` signature mismatch, reported from Safari at hero
+  139.7, 117.9). `level_camera_types` puts `initialize_hero_aligned_camera_mode` (0x2ea7a0,
+  defined with no parameter) in the `run_setup(cam)` slot. The table now holds an adapter of
+  the slot's type (source-fixes.json).
+  - All 28 slots of level 0's camera table and all 98 moby update slots were checked against
+    their definitions; this was the only mismatch.
+  - The stale "signatures" rule for `FUN_L00_001f2868` (now defined in `ee-helpers.c`) is
+    removed: the normalizer rejects a rule for a defined function.
+- **The opening scene (scene 4) runs in the game.** Mode 2, frames 1650-2530, the scene frame
+  counter reaching 818. Its actors are mobys after `D_L00_0015FFDC`: a second hero (slot 299),
+  a wrench (class 110) and class 530, active only during the scene. The gameplay hero has flag
+  0x01 (hidden) meanwhile. With the 0xFF end marker and the hide flags, the page now shows the
+  scene: Clank's crash, then Ratchet holding the wrench, then the hand-over to gameplay.
+- **The 3D layer blinking off.** The page drew the world layer only while the last world pass
+  was at most 3 frames old, the sky snapshot only when 1 frame old, and the draw buffer when 2.
+  A game frame spanning several vsyncs dropped the 3D layer (the hero with it) or the
+  layering. All three are now 20 frames or "same pass".
+- **TW / TH above 10** are taken as 10 (gs-renderer.mjs). The crash site's smoke strips set
+  TH = 14 with T running 0..1; at 16,384 rows the sampler read far past the 64 x 1024 strip
+  into unrelated memory (shimmering noise sheets). ASSUMED from the register range.
+- **Still wrong:**
+  - Effects drawn after the world point blend against the GS frame (sky), not the world, and
+    are then laid over the world opaquely. Smoke, explosions and glows come out solid.
+    Planned: render those primitives over black and over white to get each pixel's colour and
+    its transmission of the world.
+  - The ground under Clank's crash site is black (classes 760 and 809 there have no level
+    model data and are flagged hidden; not identified).
+  - The gameplay wrench's pose against the original is not resolved (same mesh as the scene's
+    class 110).
+
 ### Scenery, Fog, And The Interim Page Layer (2026-11-14)
 
 **Scenery (ties).** [tie-geometry.mjs](../../browser/tie-geometry.mjs) decodes tie classes

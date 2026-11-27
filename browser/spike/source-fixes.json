@@ -587,6 +587,18 @@
       "find": "    copy_matrix_rotation(temporary_rotation_matrix);",
       "replace": "    copy_matrix_rotation(temporary_rotation_matrix, (void *)(long)destination_matrix);",
       "why": "Pass-through argument: copy_matrix_rotation (0x1FA298) copies the rotation rows of the matrix in a1, which on the EE still holds this function's destination_matrix argument."
+    },
+    {
+      "file": "src/overlays/l00/level_class_tables.c",
+      "why": "camera_run_setup_to_new_cam calls run_setup(cam), but camera type 4's run_setup, initialize_hero_aligned_camera_mode (0x2ea7a0), is defined with no parameter: on the EE the extra a0 is harmless, in WebAssembly the indirect call traps ('call_indirect to a signature that does not match', reported from the page near Veldin's bridge). The table takes an adapter of the slot's type; the function itself is unchanged for its direct callers. The other 27 slots of level 0's table match their definitions.",
+      "find": "struct CameraType level_camera_types[8] __asm__(\"D_L00_001EA880\") __attribute__((section(\"lvl.camvtbl\"))) = {",
+      "replace": "static void initialize_hero_aligned_camera_mode_for_table(struct UpdateCam *cam) { (void)cam; initialize_hero_aligned_camera_mode(); }\nstruct CameraType level_camera_types[8] __asm__(\"D_L00_001EA880\") __attribute__((section(\"lvl.camvtbl\"))) = {"
+    },
+    {
+      "file": "src/overlays/l00/level_class_tables.c",
+      "why": "camera_run_setup_to_new_cam calls run_setup(cam), but camera type 4's run_setup, initialize_hero_aligned_camera_mode (0x2ea7a0), is defined with no parameter: on the EE the extra a0 is harmless, in WebAssembly the indirect call traps ('call_indirect to a signature that does not match', reported from the page near Veldin's bridge). The table takes an adapter of the slot's type; the function itself is unchanged for its direct callers. The other 27 slots of level 0's table match their definitions.",
+      "find": "     camera_transition_update, initialize_hero_aligned_camera_mode,",
+      "replace": "     camera_transition_update, initialize_hero_aligned_camera_mode_for_table,"
     }
   ],
   "prototypes": [
@@ -645,12 +657,6 @@
     }
   ],
   "signatures": [
-    {
-      "label": "FUN_L00_001f2868",
-      "returns": "s32",
-      "parameters": "void *, s32, void *, void *, f32",
-      "why": "collect_mobies_in_sphere: hand-written EE/VU0 assembly with no C definition. Decoded register use: $a0 the sphere centre (lqc2 vf31, 0($a0)), $a1 a flag mask (kept in $s3, tested with andi 4), $a2 a moby to skip (kept in $s2, compared with each candidate), $a3 kept in $s5, $f12 the radius (mfc1 at 0x1f2884); the count of mobys found returns in $v0 and the list is written at D_L00_00177F00. Recovered callers list the float in different positions, which the EE ignores (floats travel in $f12); in WebAssembly each order is a different signature. This order is the register order."
-    },
     {
       "label": "FUN_L00_0024d8d0",
       "returns": "s32",

@@ -137,6 +137,8 @@ document.getElementById('disc').addEventListener('change', async (event) => {
       return WorldRenderer.load(reader, { runtime, wad, planetWad }, document.getElementById('world'));
     };
     const image = context2d.createImageData(512, 416);
+    let heroHidden = 0, worldHidden = 0;
+    const report = (body) => fetch('/__report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {});
     let shown = 0;
     const runtime = await BootRuntime.create({
       module, reader, decoder, elf, padButtons, padSticks, mpeg2, audioContext, loadWorld,
@@ -150,8 +152,11 @@ document.getElementById('disc').addEventListener('change', async (event) => {
         const v = rt.view();
         const dispfb = v.getUint32(0x12000090, true) || v.getUint32(0x12000070, true);
         // The sky as it was at the first VU1 program start (boot-runtime.mjs), else at the world pass.
-        const bg = rt.skyLayer && rt.background && rt.frames - rt.skyLayer.frame <= 1 ? rt.skyLayer : rt.background;
-        const layered = bg && rt.frames - bg.frame <= 3;
+        // Layered while the game keeps running its world pass. A slow game frame can span several
+        // vsyncs, so up to 20 frames since the last pass still count (the 3D layer blinking off,
+        // hero and all, was the old 3-frame limit); the sky snapshot belongs with the latest pass.
+        const bg = rt.skyLayer && rt.background && rt.skyLayer.frame >= rt.background.frame - 1 ? rt.skyLayer : rt.background;
+        const layered = bg && rt.frames - bg.frame <= 20;
         void dispfb;
         worldCanvas.style.visibility = layered ? 'visible' : 'hidden';
         if (layered) {
@@ -169,6 +174,15 @@ document.getElementById('disc').addEventListener('change', async (event) => {
         }
         context2d.putImageData(image, 0, 0);
         if (++shown % 60 === 0) say(`Running the game (${rt.program} program): frame ${rt.frames}.`);
+        // Report the hero vanishing in gameplay: hidden for 30 frames in a row (once per spell).
+        const heroStatus = layered ? rt.world?.heroStatus : null;
+        if (heroStatus && heroStatus !== 'drawn' && !heroStatus.startsWith('hidden by the game')) {
+          if (++heroHidden === 30) report({ message: `hero not drawn for 30 frames: ${heroStatus}`, frame: rt.frames, program: rt.program, kind: 'hero-hidden' });
+        } else heroHidden = 0;
+        // ... and the 3D layer switching off in a level (no world pass for more than 3 frames).
+        if (rt.world && rt.program !== 'boot' && !layered) {
+          if (++worldHidden === 30) report({ message: `3D world not drawn for 30 frames (last world pass at frame ${bg?.frame ?? '?'})`, frame: rt.frames, program: rt.program, kind: 'world-hidden' });
+        } else worldHidden = 0;
       },
       onProgram: (program) => say(`The game loaded level ${program.level}'s program: switching to it (${program.url})...`),
       onMovie: (sector, bytes) => say(`Playing the game's movie (disc sector ${sector}, ${(bytes / 1048576).toFixed(1)} MB). Enter (START) skips.`),
@@ -181,7 +195,8 @@ document.getElementById('disc').addEventListener('change', async (event) => {
     say('main returned.');
   } catch (error) {
     // Where the game stopped: the innermost WebAssembly functions (their names are the game's labels).
-    const where = (error.stack ?? '').split('\n').map((line) => line.match(/at (?:\w+\.wasm\.)?([\w.$]+) \(.*wasm-function/)?.[1]).filter(Boolean).slice(0, 6);
+    // The stopping functions: Chrome writes "at level.wasm.NAME (...wasm-function...)", Safari "NAME@level.wasm:wasm-function[..]".
+    const where = (error.stack ?? '').split('\n').map((line) => line.match(/at (?:\w+\.wasm\.)?([\w.$]+) \(.*wasm-function/)?.[1] ?? line.match(/^([\w.$]+)@[^@]*wasm-function/)?.[1]).filter(Boolean).slice(0, 6);
     say(`Stopped at frame ${globalThis.rncBoot?.frames ?? '?'} (${globalThis.rncBoot?.program ?? 'boot'} program): ${error.message}${where.length ? ` in ${where.join(' <- ')}` : ''}`);
     // Tell the local server (serve.py writes build/reports/stops.jsonl): the error, where it
     // stopped and where the hero stood, so the stop can be found again.
